@@ -22,6 +22,12 @@ type Config struct {
 	Port int
 	// LocalIP binds to a specific interface. Empty picks the first non-loopback.
 	LocalIP string
+	// Interface is the network interface name (e.g. "br_v8") for multicast
+	// discovery. When set it takes precedence over LocalIP and works even on an
+	// interface with no IPv4 address (tagged VLANs): membership and egress are
+	// keyed by interface index. Linux only; on macOS/Windows the interface must
+	// have an IPv4 address. Empty keeps the LocalIP behaviour.
+	Interface string
 	// Broadcast uses broadcast instead of multicast.
 	Broadcast bool
 	// Name is advertised on the network.
@@ -46,6 +52,7 @@ type Remote struct {
 	targetIP  string
 	port      int
 	localIP   string
+	iface     string
 	broadcast bool
 
 	conn            *conn
@@ -68,6 +75,7 @@ func New(cfg Config) *Remote {
 		targetIP:  cfg.TargetIP,
 		port:      cfg.Port,
 		localIP:   cfg.LocalIP,
+		iface:     cfg.Interface,
 		broadcast: cfg.Broadcast,
 	}
 	r.links = newBayLinks(r)
@@ -123,7 +131,7 @@ func (r *Remote) Start(ctx context.Context) error {
 	if err := r.loadUID(); err != nil {
 		return err
 	}
-	c, err := newConn(r.effectiveTargetIP(), r.effectivePort(), r.localIP)
+	c, err := newConn(r.effectiveTargetIP(), r.effectivePort(), r.localIP, r.iface)
 	if err != nil {
 		return err
 	}
@@ -263,13 +271,14 @@ func (r *Remote) UpdateConfig(localIP string, broadcast bool) error {
 	r.localIP = localIP
 	r.broadcast = broadcast
 	old := r.conn
+	iface := r.iface
 	target, port := r.effectiveTargetIP(), r.effectivePort()
 	r.mu.Unlock()
 
 	if old != nil {
 		old.close()
 	}
-	c, err := newConn(target, port, localIP)
+	c, err := newConn(target, port, localIP, iface)
 	if err != nil {
 		return err
 	}

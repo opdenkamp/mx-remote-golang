@@ -40,7 +40,7 @@ func TestHelloFrame(t *testing.T) {
 	feat := uint32(FeatureManager)
 	payload = append(payload, byte(feat), byte(feat>>8), byte(feat>>16), byte(feat>>24))
 	got := hexOf(buildFrame(testUID, opSysHello, ProtocolVersion, payload))
-	want := "50382700000102030405060708090a0b0c0d0e0f000036002700546573744170700000000000000000005039534e303030303030303000000000312e302e30000000000000000000000000000800"
+	want := "50382700000102030405060708090a0b0c0d0e0f000036002700546573744170700000000000000000005039534e303030303030303000000000312e312e30000000000000000000000000000800"
 	if got != want {
 		t.Fatalf("hello\n got=%s\nwant=%s", got, want)
 	}
@@ -167,6 +167,14 @@ func TestStatsRequestTxFrame(t *testing.T) {
 	want := "50382700000102030405060708090a0b0c0d0e0f3f001100000102030405060708090a0b0c0d0e0f01"
 	if got != want {
 		t.Fatalf("statsreq\n got=%s\nwant=%s", got, want)
+	}
+}
+
+func TestNewConnUnknownInterface(t *testing.T) {
+	c, err := newConn(MulticastIP, 0, "", "no_such_iface0")
+	if err == nil {
+		c.close()
+		t.Fatal("expected error for unknown interface, got nil")
 	}
 }
 

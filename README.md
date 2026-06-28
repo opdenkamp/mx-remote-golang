@@ -71,6 +71,7 @@ See [`examples/discover`](examples/discover) for a runnable program:
 go run ./examples/discover            # multicast
 go run ./examples/discover -b         # broadcast
 go run ./examples/discover -l 192.168.1.20
+go run ./examples/discover -i br_v8   # join multicast on a named interface (no-IP VLAN)
 ```
 
 ## Configuration
@@ -79,12 +80,20 @@ go run ./examples/discover -l 192.168.1.20
 mxremote.Config{
     TargetIP:  "",    // multicast/broadcast IP; empty = default
     Port:      0,     // 0 = default for the mode (8812 mcast / 8811 bcast)
-    LocalIP:   "",    // interface to bind; empty = first non-loopback
+    LocalIP:   "",    // interface to bind by IP; empty = first non-loopback
+    Interface: "",    // interface name for multicast (takes precedence over LocalIP)
     Broadcast: false, // broadcast instead of multicast
     Name:      "",    // advertised name
     Callbacks: mxremote.Callbacks{ /* optional handlers */ },
 }
 ```
+
+`Interface` selects the multicast interface by **name** (e.g. `"br_v8"`) rather
+than by local IP. It joins the group and sends egress keyed on the interface
+index, so it works even on an interface with **no IPv4 address** — a tagged VLAN
+where the devices are reachable but the host has no address in their subnet. It
+takes precedence over `LocalIP` when set. This index-based join is Linux only;
+on macOS and Windows the named interface must have an IPv4 address.
 
 ## Devices and bays
 

@@ -18,6 +18,7 @@ import (
 
 func main() {
 	local := flag.String("l", "", "local interface IP to bind to")
+	iface := flag.String("i", "", "interface name to join multicast on (e.g. br_v8; works on no-IP VLANs)")
 	bcast := flag.Bool("b", false, "use broadcast instead of multicast")
 	wait := flag.Duration("w", 6*time.Second, "discovery time before printing")
 	flag.Parse()
@@ -25,6 +26,7 @@ func main() {
 	mx := mxremote.New(mxremote.Config{
 		Name:      "mxremote-go discover",
 		LocalIP:   *local,
+		Interface: *iface,
 		Broadcast: *bcast,
 		Callbacks: mxremote.Callbacks{
 			OnDeviceConfigComplete: func(d *mxremote.Device) {

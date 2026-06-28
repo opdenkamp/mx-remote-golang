@@ -20,24 +20,17 @@ type conn struct {
 	target *net.UDPAddr
 }
 
-func newConn(targetIP string, port int, localIP string) (*conn, error) {
-	if localIP == "" {
-		addrs := validAddresses()
-		if len(addrs) == 0 {
-			return nil, fmt.Errorf("failed to find a local ip address")
-		}
-		localIP = addrs[0]
-	}
+// newConn opens the discovery socket. When iface is set (an interface name such
+// as "br_v8"), multicast membership and egress are keyed by interface index,
+// which works even on an interface with no IPv4 address (tagged VLANs); iface
+// then takes precedence over localIP. When iface is empty the membership/egress
+// interface is selected by localIP (the first non-loopback IPv4 when empty).
+func newConn(targetIP string, port int, localIP, iface string) (*conn, error) {
 	target := net.ParseIP(targetIP).To4()
 	if target == nil {
 		return nil, fmt.Errorf("invalid target ip %q", targetIP)
 	}
-	local := net.ParseIP(localIP).To4()
-	if local == nil {
-		return nil, fmt.Errorf("invalid local ip %q", localIP)
-	}
-	var localAddr, groupAddr [4]byte
-	copy(localAddr[:], local)
+	var groupAddr [4]byte
 	copy(groupAddr[:], target)
 	multicast := target[0] >= 224 && target[0] <= 239
 
@@ -67,12 +60,48 @@ func newConn(targetIP string, port int, localIP string) (*conn, error) {
 		return nil, fmt.Errorf("unexpected connection type %T", pconn)
 	}
 	if multicast {
-		if err := joinMulticast(udp, groupAddr, localAddr); err != nil {
-			udp.Close()
-			return nil, err
+		if iface != "" {
+			ifi, err := net.InterfaceByName(iface)
+			if err != nil {
+				udp.Close()
+				return nil, fmt.Errorf("interface %q: %w", iface, err)
+			}
+			if err := joinMulticastIface(udp, groupAddr, ifi); err != nil {
+				udp.Close()
+				return nil, err
+			}
+		} else {
+			local, err := resolveLocalIP(localIP)
+			if err != nil {
+				udp.Close()
+				return nil, err
+			}
+			var localAddr [4]byte
+			copy(localAddr[:], local)
+			if err := joinMulticast(udp, groupAddr, localAddr); err != nil {
+				udp.Close()
+				return nil, err
+			}
 		}
 	}
 	return &conn{pc: udp, target: &net.UDPAddr{IP: target, Port: port}}, nil
+}
+
+// resolveLocalIP returns the 4-byte IPv4 for localIP, or the first non-loopback
+// IPv4 address when localIP is empty.
+func resolveLocalIP(localIP string) (net.IP, error) {
+	if localIP == "" {
+		addrs := validAddresses()
+		if len(addrs) == 0 {
+			return nil, fmt.Errorf("failed to find a local ip address")
+		}
+		localIP = addrs[0]
+	}
+	local := net.ParseIP(localIP).To4()
+	if local == nil {
+		return nil, fmt.Errorf("invalid local ip %q", localIP)
+	}
+	return local, nil
 }
 
 // joinMulticast sets the egress interface and TTL and joins the group.
