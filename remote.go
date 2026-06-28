@@ -1,0 +1,462 @@
+// Author: Lars Op den Kamp (lars@opdenkamp-it.nl)
+// Copyright (c) 2026 Op den Kamp IT Solutions
+
+package mxremote
+
+import (
+	"context"
+	"crypto/rand"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+)
+
+// Config configures a Remote.
+type Config struct {
+	// TargetIP is the multicast/broadcast destination. Empty uses the default
+	// (multicast 224.8.8.8, or the interface broadcast address when Broadcast).
+	TargetIP string
+	// Port is the UDP port. Zero uses the default for the selected mode.
+	Port int
+	// LocalIP binds to a specific interface. Empty picks the first non-loopback.
+	LocalIP string
+	// Broadcast uses broadcast instead of multicast.
+	Broadcast bool
+	// Name is advertised on the network.
+	Name string
+	// Callbacks receives state-change events.
+	Callbacks Callbacks
+}
+
+// Remote is the main entry point. It manages the UDP connection, discovers
+// devices, and maintains the device registry. Create one with New and start it
+// with Start.
+type Remote struct {
+	mu        sync.Mutex
+	devices   map[DeviceUID]*Device
+	links     *bayLinks
+	pending   []func()
+	callbacks Callbacks
+
+	uid  DeviceUID
+	name string
+
+	targetIP  string
+	port      int
+	localIP   string
+	broadcast bool
+
+	conn            *conn
+	closing         bool
+	wg              sync.WaitGroup
+	lastHello       time.Time
+	discoverTimeout time.Time
+}
+
+// New creates a Remote from cfg. Call Start to begin discovery.
+func New(cfg Config) *Remote {
+	name := cfg.Name
+	if name == "" {
+		name = "MXR Go"
+	}
+	r := &Remote{
+		devices:   map[DeviceUID]*Device{},
+		callbacks: cfg.Callbacks,
+		name:      name,
+		targetIP:  cfg.TargetIP,
+		port:      cfg.Port,
+		localIP:   cfg.LocalIP,
+		broadcast: cfg.Broadcast,
+	}
+	r.links = newBayLinks(r)
+	return r
+}
+
+func (r *Remote) effectiveTargetIP() string {
+	if r.targetIP != "" {
+		return r.targetIP
+	}
+	if !r.broadcast {
+		return MulticastIP
+	}
+	if b, err := broadcastAddress(r.localIP); err == nil && b != "" {
+		return b
+	}
+	return MulticastIP
+}
+
+func (r *Remote) effectivePort() int {
+	if r.port != 0 {
+		return r.port
+	}
+	if r.broadcast {
+		return BroadcastPort
+	}
+	return MulticastPort
+}
+
+// emit queues a callback to run after the lock is released. Must hold r.mu.
+func (r *Remote) emit(fn func()) {
+	if fn != nil {
+		r.pending = append(r.pending, fn)
+	}
+}
+
+// runLocked runs fn under the lock, then fires any queued callbacks.
+func (r *Remote) runLocked(fn func()) {
+	r.mu.Lock()
+	fn()
+	pending := r.pending
+	r.pending = nil
+	r.mu.Unlock()
+	for _, cb := range pending {
+		cb()
+	}
+}
+
+// Start loads the client UID, opens the connection and begins discovery. It
+// returns once the listener is running; discovery continues in the background
+// until Close. The ctx bounds the background goroutines' lifetime.
+func (r *Remote) Start(ctx context.Context) error {
+	if err := r.loadUID(); err != nil {
+		return err
+	}
+	c, err := newConn(r.effectiveTargetIP(), r.effectivePort(), r.localIP)
+	if err != nil {
+		return err
+	}
+	r.conn = c
+
+	r.wg.Add(1)
+	go r.receiveLoop(c)
+
+	r.txHello()
+	r.txDiscover()
+
+	r.wg.Add(1)
+	go r.backgroundProbe(ctx)
+	return nil
+}
+
+// Close stops discovery and closes the connection.
+func (r *Remote) Close() error {
+	r.mu.Lock()
+	if r.closing {
+		r.mu.Unlock()
+		return nil
+	}
+	r.closing = true
+	c := r.conn
+	r.mu.Unlock()
+
+	if c != nil {
+		c.close()
+	}
+	r.wg.Wait()
+	return nil
+}
+
+func (r *Remote) loadUID() error {
+	if !r.uid.Empty() {
+		return nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = "."
+	}
+	path := filepath.Join(home, ".mxr-uid")
+	if b, err := os.ReadFile(path); err == nil && len(b) >= 16 {
+		copy(r.uid[:], b[:16])
+		return nil
+	}
+	if _, err := rand.Read(r.uid[:]); err != nil {
+		return err
+	}
+	_ = os.WriteFile(path, r.uid[:], 0o600)
+	return nil
+}
+
+// UID returns this client's unique id.
+func (r *Remote) UID() DeviceUID { return r.uid }
+
+// Name returns the advertised name.
+func (r *Remote) Name() string { return r.name }
+
+// Devices returns a snapshot of all discovered devices.
+func (r *Remote) Devices() []*Device {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]*Device, 0, len(r.devices))
+	for _, d := range r.devices {
+		out = append(out, d)
+	}
+	return out
+}
+
+// GetByUID returns the device with the given UID, or nil.
+func (r *Remote) GetByUID(uid DeviceUID) *Device {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.devices[uid]
+}
+
+// GetBySerial returns the device with the given serial number, or nil.
+func (r *Remote) GetBySerial(serial string) *Device {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.getBySerialLocked(serial)
+}
+
+func (r *Remote) getBySerialLocked(serial string) *Device {
+	for _, d := range r.devices {
+		if d.hello.serial == serial {
+			return d
+		}
+	}
+	return nil
+}
+
+// GetByUIDString resolves a device by its dotted-hex UID string, falling back to
+// a serial-number match, mirroring the reference get_by_uid.
+func (r *Remote) GetByUIDString(s string) *Device {
+	if uid, err := ParseDeviceUID(s); err == nil {
+		if d := r.GetByUID(uid); d != nil {
+			return d
+		}
+	}
+	return r.GetBySerial(s)
+}
+
+// GetBayByPortnum returns the bay on the given device (by UID) and port, or nil.
+func (r *Remote) GetBayByPortnum(uid DeviceUID, port int) *Bay {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	d := r.devices[uid]
+	if d == nil {
+		return nil
+	}
+	return d.getByPortnumLocked(port)
+}
+
+func (r *Remote) getBayByPortnameLocked(serial, portname string) *Bay {
+	d := r.getBySerialLocked(serial)
+	if d == nil {
+		return nil
+	}
+	return d.getByPortnameLocked(portname)
+}
+
+// ValidAddresses returns the non-loopback IPv4 addresses usable as LocalIP.
+func ValidAddresses() []string { return validAddresses() }
+
+// UpdateConfig changes the local interface and/or multicast/broadcast mode at
+// runtime, reconnecting if the network parameters changed.
+func (r *Remote) UpdateConfig(localIP string, broadcast bool) error {
+	r.mu.Lock()
+	changed := r.localIP != localIP || r.broadcast != broadcast
+	if !changed {
+		r.mu.Unlock()
+		return nil
+	}
+	r.localIP = localIP
+	r.broadcast = broadcast
+	old := r.conn
+	target, port := r.effectiveTargetIP(), r.effectivePort()
+	r.mu.Unlock()
+
+	if old != nil {
+		old.close()
+	}
+	c, err := newConn(target, port, localIP)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	r.conn = c
+	r.mu.Unlock()
+
+	r.wg.Add(1)
+	go r.receiveLoop(c)
+	r.txHello()
+	r.txDiscover()
+	return nil
+}
+
+func (r *Remote) getByStreamIPLocked(ip string, audio bool) *Bay {
+	for _, d := range r.devices {
+		if !d.isV2IP() || d.v2ipSources == nil {
+			continue
+		}
+		in := d.firstInputLocked()
+		if in == nil {
+			continue
+		}
+		src := d.v2ipSourceForLocked(in)
+		if src == nil {
+			continue
+		}
+		if !audio && src.Video.IP == ip {
+			return in
+		}
+		if audio && src.Audio.IP == ip {
+			return in
+		}
+	}
+	return nil
+}
+
+// transmit sends raw bytes to the target. Safe to call without the lock.
+func (r *Remote) transmit(data []byte) (int, error) {
+	r.mu.Lock()
+	c := r.conn
+	r.mu.Unlock()
+	if c == nil {
+		return 0, fmt.Errorf("connection closed")
+	}
+	return c.transmit(data)
+}
+
+func (r *Remote) txDiscover() {
+	r.mu.Lock()
+	r.discoverTimeout = time.Now()
+	uid := r.uid
+	r.mu.Unlock()
+	_, _ = r.transmit(buildFrame(uid, opSysDiscover, 1, nil))
+}
+
+func (r *Remote) txHello() {
+	r.mu.Lock()
+	r.lastHello = time.Now()
+	uid := r.uid
+	name := r.name
+	r.mu.Unlock()
+
+	payload := make([]byte, 0, 54)
+	payload = append(payload, byte(ProtocolVersion&0xFF), byte(ProtocolVersion>>8))
+	payload = appendFixedStr(payload, name, 16)
+	payload = appendFixedStr(payload, "P9SN00000000", 16)
+	payload = appendFixedStr(payload, Version, 16)
+	feat := uint32(FeatureManager)
+	payload = append(payload, byte(feat), byte(feat>>8), byte(feat>>16), byte(feat>>24))
+	_, _ = r.transmit(buildFrame(uid, opSysHello, ProtocolVersion, payload))
+}
+
+func (r *Remote) receiveLoop(c *conn) {
+	defer r.wg.Done()
+	buf := make([]byte, 65535)
+	for {
+		n, addr, err := c.read(buf)
+		if err != nil {
+			return
+		}
+		data := make([]byte, n)
+		copy(data, buf[:n])
+		r.processDatagram(data, addr)
+	}
+}
+
+func (r *Remote) processDatagram(data []byte, addr string) {
+	ts := time.Now()
+	r.processFrame(data, addr, ts)
+
+	r.mu.Lock()
+	resend := !r.closing && time.Since(r.lastHello) >= 30*time.Second
+	r.mu.Unlock()
+	if resend {
+		r.txHello()
+	}
+}
+
+func (r *Remote) processFrame(data []byte, addr string, ts time.Time) {
+	f, err := parseFrame(data, addr, ts)
+	if err != nil {
+		return
+	}
+	if f.remoteID() == r.uid {
+		return
+	}
+	handler := frameHandlers[f.opcode()]
+	r.runLocked(func() {
+		if handler != nil {
+			handler(r, f)
+		}
+		// Any frame from a known device proves it is alive — refresh its
+		// liveness so online detection doesn't rely on hello frames alone
+		// (V2IP devices use a 15s window but only hello every 30s).
+		if d := r.devices[f.remoteID()]; d != nil {
+			d.touch(f.timestamp)
+		}
+	})
+}
+
+func (r *Remote) backgroundProbe(ctx context.Context) {
+	defer r.wg.Done()
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			r.mu.Lock()
+			if r.closing {
+				r.mu.Unlock()
+				return
+			}
+			txDiscover := false
+			hasComplete := false
+			for _, d := range r.devices {
+				if d.configurationCompleteLocked() {
+					hasComplete = true
+				}
+			}
+			if !hasComplete {
+				txDiscover = true
+			} else {
+				for _, d := range r.devices {
+					d.checkOnline()
+					if !d.configurationCompleteLocked() && time.Since(d.helloReceived) <= 15*time.Second {
+						// still within the grace period
+					} else if !d.configurationCompleteLocked() {
+						txDiscover = true
+					}
+				}
+			}
+			due := time.Since(r.discoverTimeout) >= 5*time.Second
+			pending := r.pending
+			r.pending = nil
+			r.mu.Unlock()
+			for _, cb := range pending {
+				cb()
+			}
+			if txDiscover && due {
+				r.txDiscover()
+			}
+		}
+	}
+}
+
+// onHello registers or updates a device from a hello frame.
+func (r *Remote) onHello(h helloInfo, uid DeviceUID) {
+	d := r.devices[uid]
+	if d == nil {
+		d = newDevice(r, uid, h)
+		r.devices[uid] = d
+	}
+	d.applyHello(h)
+}
+
+// appendFixedStr appends value (ASCII, truncated to size) padded with NULs to size.
+func appendFixedStr(dst []byte, value string, size int) []byte {
+	b := []byte(value)
+	if len(b) > size {
+		b = b[:size]
+	}
+	dst = append(dst, b...)
+	for i := len(b); i < size; i++ {
+		dst = append(dst, 0)
+	}
+	return dst
+}
