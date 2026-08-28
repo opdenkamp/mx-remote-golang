@@ -189,6 +189,7 @@ checks here find three different things, and each is silent about the others:
 | offset-mutation sweep | fields no test exercises | wrong width, wrong branch |
 | `poisoned()` fixtures | fields read at the wrong width | fields no test reaches |
 | `go test -cover` on handlers | opcodes nothing runs at all | anything a test runs but never asserts |
+| builder/decoder round trip | fields decoded at the right offset but attributed to the wrong thing | a builder and decoder that are wrong *together* |
 
 **Assert both directions of a guard, and pick an input that can actually trip
 it.** A test that only checks the refusal passes for a guard hardcoded to
@@ -208,7 +209,12 @@ alone - two decode bugs here (`0x39`'s port and `0x08`'s source bays) survived
 because the assertion passed on state an earlier frame had set.
 
 A handler with no test reports clean from the first two for the same reason an
-empty file does. Every productive finding here came from asking what a tool was
+empty file does. The round trip is the only one of the four that tests
+*meaning* rather than position: a source read as a target, or a left delay as a
+right one, is positionally perfect and semantically inverted, and only a
+disagreement between the two halves of the library exposes it. Where both
+halves are wrong together it is clean, and nothing but an external reference —
+a captured frame, or the firmware struct — closes that. Every productive finding here came from asking what a tool was
 silent about, not from reading its output more carefully.
 
 **Build test payloads with `poisoned()`, not `make([]byte, n)`.** A zero-filled
