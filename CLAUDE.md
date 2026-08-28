@@ -143,7 +143,7 @@ arrives at the code it names, and simplicity is exactly what makes such a
 fixture look trustworthy. Build the fixture that reaches the thing, then check
 it still fails when the thing is broken.
 
-**A scan has four separate questions, and fixing one does not answer the
+**A scan has five separate questions, and fixing one does not answer the
 others.** Each of these was a real hole here, found only when someone named it:
 
 1. *Does the pattern still match?* — assert a minimum number of sites, or a
@@ -152,7 +152,13 @@ others.** Each of these was a real hole here, found only when someone named it:
    fail with its location, never be skipped.
 3. *Does every site get matched?* — find sites with a loose pattern too, and
    require each to be readable by the detailed one.
-4. *Is the guarded thing still the only way through?* — the send scan assumes
+4. *Does this check still look at anything at all?* — and this one recurses.
+   An assertion phrased as "not too many" passes when the search finds nothing.
+   The subdirectory check here globbed `*/`, which Go does not match at all, so
+   it examined nothing and passed for as long as it existed; it was only found
+   by rewriting it to assert the exact expected set. Phrase every check so that
+   a search returning nothing fails it.
+5. *Is the guarded thing still the only way through?* — the send scan assumes
    one function builds every frame and one writes every socket. Neither is
    enforced by the language, so `TestTheChokePointsAreStillChokePoints` counts
    them. A second builder or a second write bypasses the gate, and the send

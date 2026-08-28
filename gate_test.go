@@ -407,10 +407,27 @@ func TestTheChokePointsAreStillChokePoints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// no subpackage can hide one: this is a single flat package by design, and
-	// examples/ is a separate module path that cannot reach unexported sends
-	if dirs, _ := filepath.Glob("*/"); len(dirs) > 1 {
-		t.Errorf("more than one subdirectory (%v); this scan only reads the package root", dirs)
+	// No subpackage can hide a send: this is a single flat package by design,
+	// and examples/ is a separate module path that cannot reach unexported
+	// ones. Asserted as the exact expected set rather than "not more than one",
+	// because the latter also passes when the glob stops matching anything.
+	// filepath.Glob has no trailing-slash directory form, unlike a shell, so
+	// this reads entries and filters. The first version globbed "*/" and
+	// matched nothing at all — and passed, because it only checked there were
+	// not too many.
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dirs []string
+	for _, e := range entries {
+		if e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
+			dirs = append(dirs, e.Name())
+		}
+	}
+	if len(dirs) != 1 || dirs[0] != "examples" {
+		t.Errorf("subdirectories = %v, want exactly [examples]; this scan only reads "+
+			"the package root, so anything else could hold a send it never sees", dirs)
 	}
 
 	var buildSites, sendSites []string
