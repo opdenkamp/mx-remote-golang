@@ -118,6 +118,22 @@ holds its EDID profile as an `int` and returns `EdidProfile` only from the
 accessor), which is what makes an unrecognised value survive to the caller.
 Keep it that way round.
 
+**A tool that perturbs code and reports on the result must assert that its
+perturbation landed.** Every such tool used here has lied at least once by
+silently not applying: a regex that matched a type name instead of an offset, a
+string replace that hit the wrong occurrence of a repeated literal, a removal
+whose pattern did not match at all. In each case the tool reported "nothing
+noticed this change" when the truth was "there was no change". Check the
+mutation took effect before running the suite, and treat a clean sweep from a
+tool that has never been shown to fail as unmeasured rather than clean.
+
+**Audit by walking the code, not by re-reading the list you believe you
+covered.** The one method that slipped the protocol gate was found by walking
+every `buildFrame` call out to its enclosing function; it was the single
+device-targeted method that built and sent its own frame while its siblings
+delegated to an already-gated one. `buildFrame` is the only frame constructor
+and every `transmit` takes its result, which is what makes that walk complete.
+
 **Every layer that asserts something can encode the same mistake — including
 the one added to catch it.** This has bitten in the decoder, in a fixture
 written to pin the decoder, and in a hand-check written to validate the fixture.
