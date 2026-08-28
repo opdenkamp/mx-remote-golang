@@ -4,6 +4,7 @@
 package mxremote
 
 import (
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -239,4 +240,65 @@ func TestControlMethodsRoundTrip(t *testing.T) {
 			t.Fatal("volume also landed on the addressed bay; this handler is sender-keyed")
 		}
 	})
+}
+
+// processDatagram is the real receive entry point; every other test here enters
+// one level below it at processFrame, which is where the Python port found the
+// same shape hiding its echo skip.
+//
+// The layer is not empty: it is the only thing that re-announces this client's
+// hello. The background probe sends discover and never hello, so if this stops
+// working the client goes silent to peers that started after it did, and no
+// test below this level would notice.
+func TestProcessDatagramReannouncesHello(t *testing.T) {
+	r := newTestRemote(Callbacks{})
+	r.uid = uidN(200)
+	peer := uidN(201)
+
+	var sent [][]byte
+	r.mu.Lock()
+	r.txTap = func(b []byte) { sent = append(sent, append([]byte(nil), b...)) }
+	r.mu.Unlock()
+
+	helloCount := func() int {
+		n := 0
+		for _, f := range sent {
+			if len(f) >= headerLen && binary.LittleEndian.Uint16(f[20:22]) == opSysHello {
+				n++
+			}
+		}
+		return n
+	}
+
+	datagram := buildFrame(peer, opSysDiscover, protocolFor(opSysDiscover), nil)
+
+	// a recent hello: an arriving datagram must not trigger another
+	r.mu.Lock()
+	r.lastHello = time.Now()
+	r.mu.Unlock()
+	sent = sent[:0]
+	r.processDatagram(datagram, "10.8.8.9")
+	if n := helloCount(); n != 0 {
+		t.Fatalf("re-announced %d times with a fresh hello, want 0", n)
+	}
+
+	// once the hello has aged past its window, the next datagram re-announces
+	r.mu.Lock()
+	r.lastHello = time.Now().Add(-31 * time.Second)
+	r.mu.Unlock()
+	sent = sent[:0]
+	r.processDatagram(datagram, "10.8.8.9")
+	if n := helloCount(); n != 1 {
+		t.Fatalf("re-announced %d times with a stale hello, want 1", n)
+	}
+
+	// and the frame itself is still processed, not swallowed by the re-announce
+	r.mu.Lock()
+	r.lastHello = time.Now()
+	r.mu.Unlock()
+	r.processDatagram(buildFrame(peer, opSysHello, protocolFor(opSysHello),
+		helloPayload(0x28, "Peer", "PR0001", "4.8.0", FeatureVideoRouting)), "10.8.8.9")
+	if r.GetByUID(peer) == nil {
+		t.Fatal("the datagram's own frame was not processed")
+	}
 }
