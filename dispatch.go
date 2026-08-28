@@ -3,7 +3,10 @@
 
 package mxremote
 
-import "net"
+import (
+	"encoding/binary"
+	"net"
+)
 
 // frameHandlers maps an opcode to its receive handler. Handlers run with the
 // Remote lock held and queue callbacks via Remote.emit.
@@ -38,6 +41,36 @@ var frameHandlers = map[uint16]func(*Remote, *frame){
 	opMeshOperation:         handleMeshOperation,
 	opV2IPDeviceCfg:         handleV2IPDeviceConfiguration,
 	opV2IPBayMappings:       handleV2IPBayMapping,
+	opSysDiscover:           handleDiscoverRequest,
+	opDevEDID:               handleEDID,
+	opMxSetRoute:            handleSetRoute,
+	opAudioSetRoute:         handleAudioSetRoute,
+	opRCIr:                  handleIRCapture,
+	opAudioVolumeUp:         handleVolumeStep(true),
+	opAudioVolumeDown:       handleVolumeStep(false),
+	opAudioVolumeMute:       handleVolumeMute,
+	opAudioClip:             handleAudioClip,
+	opPDUState:              handlePDUState,
+	opV2IPLinkRemote:        handleV2IPLinkRemote,
+	opV2IPDetectBays:        handleDetectBays,
+	opChangeBayName:         handleChangeBayName,
+	opSysReboot:             handleReboot,
+	opSysMonitoringPulse:    handleMonitoringPulse,
+	opV2IPUpgradeFPGA:       handleUpgradeFPGA,
+	opV2IPBlistRegister:     handleBlacklist(true),
+	opV2IPBlistUnregister:   handleBlacklist(false),
+	opBayEDIDProfile:        handleEDIDProfile,
+	opSetupStatus:           handleSetupStatus,
+	opSetInstaller:          handleSetInstaller,
+	opBayFilterStatus:       handleFilterStatus,
+	opSysFactoryReset:       handleFactoryReset,
+	opV2IPTiling:            handleV2IPTiling,
+	opV2IPPowerSave:         handleV2IPPowerSave,
+	opRCSettings:            handleRCSettings,
+	opRCTxKey:               handleTxKey,
+	opRCTxAction:            handleTxAction,
+	opRCIrTx:                handleIRTransmit,
+	opV2IPVideoWall:         handleVideoWall,
 }
 
 func (r *Remote) deviceFor(f *frame) *Device { return r.devices[f.remoteID()] }
@@ -61,6 +94,13 @@ func handleHello(r *Remote, f *frame) {
 	r.onHello(h, f.remoteID())
 }
 
+// handleBayConfig merges one page of bay descriptors into the device cache.
+//
+// A device pages its bays across several frames: firmware sizes each page
+// against mxr_max_payload_len() and shrinks it further on OOM, so the record
+// count varies from frame to frame and no single frame holds the whole list.
+// Merge records rather than replacing the cache, and never read the record
+// count as the device's bay count.
 func handleBayConfig(r *Remote, f *frame) {
 	dev := r.deviceFor(f)
 	if dev == nil {
@@ -283,18 +323,47 @@ func handleV2IPDeviceConfiguration(r *Remote, f *frame) {
 		return
 	}
 	details := DeviceV2IPDetails{
-		Video:  parseStreamSource("video", p[16:22]),
-		Audio:  parseStreamSource("audio", p[24:30]),
-		Anc:    parseStreamSource("anc", p[32:38]),
-		Arc:    parseStreamSource("arc", p[48:54]),
-		TxRate: p[40],
+		Video: parseStreamSource("video", p[16:22]),
+		Audio: parseStreamSource("audio", p[24:30]),
+		Anc:   parseStreamSource("anc", p[32:38]),
+		Arc:   parseStreamSource("arc", p[48:54]),
+		Dscp: V2IPDscpConfig{
+			Video: parseDscp(p[41]),
+			Audio: parseDscp(p[42]),
+			Anc:   parseDscp(p[43]),
+		},
 		Scaling: V2IPScalingSettings{
-			Mode:    uint16(p[56]) | uint16(p[57])<<8,
+			Mode:    MxrSignalType(uint16(p[56]) | uint16(p[57])<<8),
 			Refresh: uint16(p[58]) | uint16(p[59])<<8,
-			Flags:   p[60],
+			// only bits 0, 1 and 7 are defined; firmware predating the fix
+			// builds this from an uninitialised stack local, so the rest is
+			// noise and must not reach the cache even on a first frame
+			Flags: p[60] & (ScalingFlagModeValid | ScalingFlagOptionsValid | ScalingFlagAutoScaling),
 		},
 	}
+	if p[40] >= V2IPSourceRateMin && p[40] <= V2IPSourceRateMax {
+		rate := p[40]
+		details.TxRate = &rate
+	}
 	dev.setV2IPDetails(details)
+
+	// The tiling block carries no validity flag of its own; its uid is the
+	// marker. Every path that produces a real window stamps it, and a
+	// controller writing any other field sends the block zeroed - so uid zero
+	// means "not carried" while uid set with zero geometry is a real clear.
+	if len(p) >= 88 {
+		var uid DeviceUID
+		copy(uid[:], p[64:80])
+		if !uid.Empty() {
+			dev.setTiling(V2IPTilingConfig{
+				Target: uid,
+				PosX:   binary.LittleEndian.Uint16(p[80:82]),
+				PosY:   binary.LittleEndian.Uint16(p[82:84]),
+				Width:  binary.LittleEndian.Uint16(p[84:86]),
+				Height: binary.LittleEndian.Uint16(p[86:88]),
+			})
+		}
+	}
 
 	if len(p) >= 120 {
 		sink := DeviceV2IPSink{
@@ -336,7 +405,7 @@ func handleBayStatus(r *Remote, f *frame) {
 	if dev == nil {
 		return
 	}
-	port, ok := f.u8(0)
+	port, ok := f.u8(1)
 	if !ok {
 		return
 	}
@@ -357,6 +426,8 @@ func handleBayStatus(r *Remote, f *frame) {
 	}
 }
 
+// handleLinks merges one page of link descriptors into the link registry.
+// Paged the same way as the bay config, so the same merge rule applies.
 func handleLinks(r *Remote, f *frame) {
 	dev := r.deviceFor(f)
 	if dev == nil {
@@ -504,6 +575,16 @@ func handleMultiviewer(r *Remote, f *frame) {
 	if sub == mvOpStatus {
 		dev.updateMultiviewer(parseMVConfig(f))
 	}
+	if r.callbacks.OnMultiviewerCommand == nil {
+		return
+	}
+	target, _ := f.uuid(0)
+	cmd := MultiviewerCommand{Target: target, Op: sub}
+	if p := f.payload(); len(p) > 24 {
+		cmd.Params = append([]byte(nil), p[24:]...)
+	}
+	cb := r.callbacks.OnMultiviewerCommand
+	r.emit(func() { cb(dev, cmd) })
 }
 
 func handleAudio(r *Remote, f *frame) {
@@ -525,6 +606,20 @@ func handleAudio(r *Remote, f *frame) {
 		}
 	case audioOpLinks:
 		dev.applyAudioLinks(parseAudioLinks(f, 0))
+	case audioOpSelectInput:
+		if ch, ok := parseAudioChangeSource(f); ok {
+			dev.setAudioSelectInput(ch)
+		}
+	case audioOpMute, audioOpTrigger, audioOpVolume:
+		endpoint, ok := f.u16(20)
+		if !ok {
+			return
+		}
+		value, ok := f.u32(24)
+		if !ok {
+			return
+		}
+		dev.emitAudioParam(op, int(endpoint), value)
 	}
 }
 
@@ -537,10 +632,16 @@ func handleFirmwareVersion(r *Remote, f *frame) {
 	if !ok {
 		return
 	}
-	if ftype > 3 {
-		ftype = 0
+	// read at most the field's own width, but settle for what a peer sending a
+	// short frame did give us rather than losing the whole report over a name
+	nameLen := len(f.payload()) - 12
+	if nameLen > fwVersionLen {
+		nameLen = fwVersionLen
 	}
-	version, ok := f.str(12, -1)
+	if nameLen <= 0 {
+		return
+	}
+	version, ok := f.str(12, nameLen)
 	if !ok {
 		return
 	}
@@ -624,7 +725,8 @@ func (b *Bay) emitKey(k RCKey) {
 }
 
 func (d *Device) setV2IPDetails(det DeviceV2IPDetails) {
-	d.v2ipDetails = &det
+	merged := det.merge(d.v2ipDetails)
+	d.v2ipDetails = &merged
 	d.emitSelf()
 }
 

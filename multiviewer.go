@@ -165,9 +165,16 @@ func parseMVConfig(f *frame) mvConfig {
 	uuid := func(idx int) DeviceUID { v, _ := f.uuid(idx); return v }
 	str := func(idx, n int) string { v, _ := f.str(idx, n); return v }
 
-	bounded := func(idx, max int) int {
+	// A value this library has no name for is passed through as it arrived. The
+	// alternative - folding it to zero - reports it as whichever mode happens
+	// to be zero, so a firmware that adds a mode would make a driver read a
+	// confidently wrong value rather than an unrecognised one.
+	raw := func(idx int) int { return int(u8(idx)) }
+
+	// Bound only where the field is a numeric range rather than an enum.
+	clampPercent := func(idx int) int {
 		v := int(u8(idx))
-		if v > max {
+		if v > 100 {
 			return 0
 		}
 		return v
@@ -177,15 +184,15 @@ func parseMVConfig(f *frame) mvConfig {
 		mcuVersion:    str(40+4*16, 32),
 		scalerVersion: str(40+6*16, 32),
 		hwViewMode:    u8(168),
-		viewMode:      MultiviewerViewMode(bounded(169, 8)),
-		pipPosition:   MultiviewerPipPosition(bounded(170, 4)),
-		pipSize:       MultiviewerPipSize(bounded(171, 3)),
-		outputMode:    MultiviewerOutputMode(bounded(172, 14)),
-		hdcpMode:      MultiviewerHDCPMode(bounded(173, 2)),
-		outputITC:     MultiviewerITCMode(bounded(174, 2)),
-		edidTemplate:  MultiviewerEDIDTemplate(bounded(175, 19)),
-		aspectRatio:   MultiviewerAspectRatio(bounded(177, 19)),
-		audioVolume:   bounded(180, 100),
+		viewMode:      MultiviewerViewMode(raw(169)),
+		pipPosition:   MultiviewerPipPosition(raw(170)),
+		pipSize:       MultiviewerPipSize(raw(171)),
+		outputMode:    MultiviewerOutputMode(raw(172)),
+		hdcpMode:      MultiviewerHDCPMode(raw(173)),
+		outputITC:     MultiviewerITCMode(raw(174)),
+		edidTemplate:  MultiviewerEDIDTemplate(raw(175)),
+		aspectRatio:   MultiviewerAspectRatio(raw(177)),
+		audioVolume:   clampPercent(180),
 		remoteControl: mvSourcePlus(u8(186)),
 		audioSource:   mvSourcePlus(u8(179)),
 		autoSwitch:    mvBool(u8(178)),
@@ -193,7 +200,7 @@ func parseMVConfig(f *frame) mvConfig {
 	}
 	for i := 0; i < 4; i++ {
 		c.mappings[i] = uuid(40 + i*16)
-		c.videoSources[i] = MultiviewerSource(bounded(182+i, 4))
+		c.videoSources[i] = MultiviewerSource(raw(182 + i))
 	}
 	return c
 }
@@ -392,6 +399,28 @@ func (m *Multiviewer) ScalerVersion() string {
 
 // mvCmdPayload assembles a multiviewer command body: target uid + opcode + 7
 // pad + args.
+// MultiviewerCommand is one V2IP_MULTIVIEWER sub-command as it arrived.
+//
+// The opcode multiplexes sixteen sub-commands on the byte at offset 16 behind a
+// uniform envelope: target uid, sub-opcode, seven pad, then parameters. Only
+// STATUS reports state; the other fifteen are requests, and what they change
+// comes back on the following STATUS.
+//
+// The parameters are exposed as raw bytes on purpose. The opcode is owned by
+// the multiviewer module rather than MatrixOS, so beyond the envelope there is
+// no firmware source here to pin per-sub-command field semantics against.
+type MultiviewerCommand struct {
+	Target DeviceUID
+	// Op is the sub-opcode. Values this library has no name for still arrive.
+	Op byte
+	// Params is everything after the envelope, empty when the frame carries none.
+	Params []byte
+}
+
+func (c MultiviewerCommand) String() string {
+	return fmt.Sprintf("multiviewer command %d for %s (%d param bytes)", c.Op, c.Target, len(c.Params))
+}
+
 func mvCmdPayload(target DeviceUID, op byte, args ...byte) []byte {
 	payload := make([]byte, 0, 24+len(args))
 	payload = append(payload, target[:]...)
@@ -410,6 +439,9 @@ func (m *Multiviewer) cmd(op byte, args ...byte) error {
 	}
 	target, uid := m.dev.uid, r.uid
 	r.mu.Unlock()
+	// stamped above this opcode's 0x16 minimum, matching the reference library.
+	// MatrixOS has no handler for it - the multiviewer module owns the opcode - so
+	// the format an 0x16..0x1F receiver expects here is unverified.
 	_, err := r.transmit(buildFrame(uid, opV2IPMultiviewer, 0x20, mvCmdPayload(target, op, args...)))
 	return err
 }

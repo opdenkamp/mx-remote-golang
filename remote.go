@@ -20,7 +20,14 @@ type Config struct {
 	TargetIP string
 	// Port is the UDP port. Zero uses the default for the selected mode.
 	Port int
-	// LocalIP binds to a specific interface. Empty picks the first non-loopback.
+	// LocalIP selects the interface by address: it becomes the multicast egress
+	// interface and the membership interface, so it decides which NIC frames
+	// leave by and which one they are accepted on. Empty picks the first
+	// non-loopback IPv4 the host enumerates, which on a multi-homed host is
+	// arbitrary - set this or Interface whenever more than one NIC exists. The
+	// symptom of picking wrong is one-sided: periodic broadcasts still arrive,
+	// so discovery looks healthy while every request this library sends leaves
+	// by the wrong NIC and is never answered.
 	LocalIP string
 	// Interface is the network interface name (e.g. "br_v8") for multicast
 	// discovery. When set it takes precedence over LocalIP and works even on an
@@ -332,7 +339,7 @@ func (r *Remote) txDiscover() {
 	r.discoverTimeout = time.Now()
 	uid := r.uid
 	r.mu.Unlock()
-	_, _ = r.transmit(buildFrame(uid, opSysDiscover, 1, nil))
+	_, _ = r.transmit(buildFrame(uid, opSysDiscover, protocolFor(opSysDiscover), nil))
 }
 
 func (r *Remote) txHello() {
@@ -349,7 +356,7 @@ func (r *Remote) txHello() {
 	payload = appendFixedStr(payload, Version, 16)
 	feat := uint32(FeatureManager)
 	payload = append(payload, byte(feat), byte(feat>>8), byte(feat>>16), byte(feat>>24))
-	_, _ = r.transmit(buildFrame(uid, opSysHello, ProtocolVersion, payload))
+	_, _ = r.transmit(buildFrame(uid, opSysHello, protocolFor(opSysHello), payload))
 }
 
 func (r *Remote) receiveLoop(c *conn) {

@@ -33,7 +33,11 @@ const (
 	FeatureMesh           DeviceFeature = 1 << 21
 	FeatureMultiviewer    DeviceFeature = 1 << 22
 	FeatureStatusCrashed  DeviceFeature = 1 << 23
-	FeatureBootBit        DeviceFeature = 1 << 31
+	FeatureVideoWall      DeviceFeature = 1 << 24
+	// FeatureConfigInitialised marks firmware that initialises the config it
+	// broadcasts. Without it, see Device.ConfigInitialised for what to distrust.
+	FeatureConfigInitialised DeviceFeature = 1 << 25
+	FeatureBootBit           DeviceFeature = 1 << 31
 )
 
 // Has reports whether all bits in f are set.

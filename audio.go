@@ -3,6 +3,8 @@
 
 package mxremote
 
+import "fmt"
+
 // AudioFeatures is the capability bitmask of a V2IP audio endpoint.
 type AudioFeatures uint32
 
@@ -190,12 +192,51 @@ type AudioLink struct {
 	LinkDevice   DeviceUID
 }
 
-// AudioChangeSource describes an audio input-selection change.
+// AudioChangeSource describes an audio input-selection change: which source
+// endpoint a sink endpoint was switched to.
+//
+// The sink is named twice on the wire, once as the command header's target and
+// again at the head of the body; the body's second uid is the source. The
+// reference Python library's decoder reads these the other way round from its
+// own frame builder - the header convention every other audio sub-command
+// follows is what settles it.
 type AudioChangeSource struct {
+	// SourceUID and SourceID name the endpoint being listened to.
 	SourceUID DeviceUID
-	TargetUID DeviceUID
 	SourceID  int
+	// TargetUID and TargetID name the sink endpoint doing the listening.
+	TargetUID DeviceUID
 	TargetID  int
+}
+
+func (a AudioChangeSource) String() string {
+	return fmt.Sprintf("audio source change %s:%d -> %s:%d",
+		a.SourceUID, a.SourceID, a.TargetUID, a.TargetID)
+}
+
+// parseAudioChangeSource decodes a SELECT_INPUT body, which follows the 20-byte
+// audio command header: sink uid, source uid, then the two endpoint ids.
+func parseAudioChangeSource(f *frame) (AudioChangeSource, bool) {
+	sink, ok := f.uuid(20)
+	if !ok {
+		return AudioChangeSource{}, false
+	}
+	source, ok := f.uuid(36)
+	if !ok {
+		return AudioChangeSource{}, false
+	}
+	sinkEP, ok := f.u16(52)
+	if !ok {
+		return AudioChangeSource{}, false
+	}
+	sourceEP, ok := f.u16(54)
+	if !ok {
+		return AudioChangeSource{}, false
+	}
+	return AudioChangeSource{
+		SourceUID: source, SourceID: int(sourceEP),
+		TargetUID: sink, TargetID: int(sinkEP),
+	}, true
 }
 
 // audio command opcodes (u16 at payload offset 0).

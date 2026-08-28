@@ -41,6 +41,8 @@ type Bay struct {
 	decoderDisabled *bool
 	encoderDisabled *bool
 	signalType      *string
+	signalDetails   *BaySignalDetails
+	filtered        []DeviceUID
 	arc             string
 	audioVolume     *VolumeMuteStatus
 	rcType          *int
@@ -262,6 +264,19 @@ func (b *Bay) SignalType() string {
 	return "unknown"
 }
 
+// SignalDetails returns the detail block from the bay's last signal status
+// report, or nil if none has arrived.
+func (b *Bay) SignalDetails() *BaySignalDetails {
+	r := b.dev.remote
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if b.signalDetails == nil {
+		return nil
+	}
+	d := *b.signalDetails
+	return &d
+}
+
 // PowerStatusValue returns the computed CEC power status of the connected device.
 func (b *Bay) PowerStatusValue() PowerStatus {
 	r := b.dev.remote
@@ -420,6 +435,36 @@ func (b *Bay) setSignalType(v string) {
 		r := b.dev.remote
 		b.notify(pick(r.callbacks.OnStatusSignalTypeChanged != nil, func() { r.callbacks.OnStatusSignalTypeChanged(b, v) }))
 	}
+}
+
+// FilteredDevices returns the source devices filtered out of this sink's
+// picker, as last reported.
+func (b *Bay) FilteredDevices() []DeviceUID {
+	r := b.dev.remote
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]DeviceUID(nil), b.filtered...)
+}
+
+func (b *Bay) setFiltered(filtered []DeviceUID) {
+	changed := len(filtered) != len(b.filtered)
+	if !changed {
+		for i := range filtered {
+			if filtered[i] != b.filtered[i] {
+				changed = true
+				break
+			}
+		}
+	}
+	b.filtered = filtered
+	if changed {
+		r := b.dev.remote
+		b.notify(pick(r.callbacks.OnFilteredDevicesChanged != nil, func() { r.callbacks.OnFilteredDevicesChanged(b, filtered) }))
+	}
+}
+
+func (b *Bay) setSignalDetails(d BaySignalDetails) {
+	b.signalDetails = &d
 }
 
 func (b *Bay) setArc(v string) {

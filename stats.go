@@ -3,7 +3,10 @@
 
 package mxremote
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+	"fmt"
+)
 
 // V2IPTxStats holds transmitter stream statistics.
 type V2IPTxStats struct {
@@ -21,16 +24,33 @@ const (
 	DecoderUnknown V2IPDecoderState = 0
 	DecoderHealthy V2IPDecoderState = 1
 	DecoderBad     V2IPDecoderState = 2
+	// DecoderStarting is a decoder still coming up, which any sink subscribed
+	// to during a route change reports.
+	DecoderStarting V2IPDecoderState = 3
 )
+
+// Settled reports whether the decoder has reached a verdict.
+//
+// Only Healthy and Bad are verdicts; Unknown and Starting both mean the sink
+// has not said yet. Testing for failure as "not Healthy" reads a receiver that
+// is merely coming up as one that failed to decode, which is what a sink
+// reports for a moment after every route change.
+func (s V2IPDecoderState) Settled() bool {
+	return s == DecoderHealthy || s == DecoderBad
+}
 
 func (s V2IPDecoderState) String() string {
 	switch s {
+	case DecoderUnknown:
+		return "Unknown"
 	case DecoderHealthy:
 		return "Healthy"
 	case DecoderBad:
 		return "Bad"
+	case DecoderStarting:
+		return "Starting"
 	}
-	return "Unknown"
+	return fmt.Sprintf("state %d", int(s))
 }
 
 // V2IPRxStats holds receiver stream statistics.
@@ -47,6 +67,18 @@ type V2IPRxStats struct {
 	AncSeqErrors   uint32
 	DecoderState   V2IPDecoderState
 }
+
+// Block sizes of the 0x3F payload. fpga_tx_stats and fpga_rx_stats are 20 and
+// 44 rather than 24 and 48 because their ALIGN(8) sits before the struct
+// keyword, where GCC ignores it. The 128-byte total is therefore stable by
+// accident: correcting those declarations would shift every block after the
+// first while changing nothing a reader of the header could detect, so pin the
+// sizes rather than only the field offsets.
+const (
+	txStatsSize   = 20
+	rxStatsSize   = 44
+	v2ipStatsSize = 2*txStatsSize + 2*rxStatsSize
+)
 
 // V2IPDeviceStats holds the cumulative and per-minute TX/RX statistics.
 type V2IPDeviceStats struct {
@@ -91,13 +123,14 @@ func handleV2IPStats(r *Remote, f *frame) {
 		return
 	}
 	p := f.payload()
-	if len(p) == 17 || len(p) < 128 {
+	if len(p) == 17 || len(p) < v2ipStatsSize {
 		return
 	}
+	rx := 2 * txStatsSize
 	dev.setV2IPStats(V2IPDeviceStats{
-		Tx:          parseTxStats(p[0:20]),
-		TxPerMinute: parseTxStats(p[20:40]),
-		Rx:          parseRxStats(p[40:84]),
-		RxPerMinute: parseRxStats(p[84:128]),
+		Tx:          parseTxStats(p[0:txStatsSize]),
+		TxPerMinute: parseTxStats(p[txStatsSize : 2*txStatsSize]),
+		Rx:          parseRxStats(p[rx : rx+rxStatsSize]),
+		RxPerMinute: parseRxStats(p[rx+rxStatsSize : rx+2*rxStatsSize]),
 	})
 }

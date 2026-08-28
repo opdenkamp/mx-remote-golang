@@ -46,6 +46,12 @@ type Device struct {
 
 	v2ipSources   []V2IPStreamSources
 	v2ipDetails   *DeviceV2IPDetails
+	pduState      *PDUState
+	setupDone     *bool
+	installerID   *uint16
+	tiling        *V2IPTilingConfig
+	rcSettings    *RCSettings
+	audioSelect   *AudioChangeSource
 	v2ipSink      *DeviceV2IPSink
 	v2ipVersions  map[FirmwareType]FirmwareVersion
 	meshMasterUID DeviceUID
@@ -191,6 +197,14 @@ func (d *Device) isOneipMultiviewer() bool {
 	return d.isV2IP() && d.hello.features.Has(FeatureMultiviewer)
 }
 
+func (d *Device) configInitialised() bool {
+	return d.hello.features.Has(FeatureConfigInitialised)
+}
+
+func (d *Device) supportsVideoWall() bool {
+	return d.hello.features.Has(FeatureVideoWall)
+}
+
 func (d *Device) hasLocalSource() bool {
 	in := d.firstInputLocked()
 	return in != nil && in.isLocal()
@@ -219,6 +233,20 @@ func (d *Device) IsAmp() bool { return d.lockedBool(d.isAmp) }
 
 // IsOneIPMultiviewer reports whether this is a OneIP multiviewer.
 func (d *Device) IsOneIPMultiviewer() bool { return d.lockedBool(d.isOneipMultiviewer) }
+
+// ConfigInitialised reports whether this device's firmware initialises the
+// configuration it broadcasts.
+//
+// Firmware without it builds some frames over uninitialised stack, so these
+// read as noise rather than as values: the scaling flags and, behind a
+// spuriously set ScalingFlagModeValid, the scaling mode and refresh; bay 0's
+// source addresses in the V2IP sources frame; and the padding beside RCTarget.
+// Everything from a device reporting this bit is trustworthy.
+func (d *Device) ConfigInitialised() bool { return d.lockedBool(d.configInitialised) }
+
+// SupportsVideoWall reports whether this sink can crop its source to a video
+// wall window.
+func (d *Device) SupportsVideoWall() bool { return d.lockedBool(d.supportsVideoWall) }
 
 // IsOneIPTx reports whether this is a OneIP transmitter.
 func (d *Device) IsOneIPTx() bool { return d.lockedBool(d.isOneipTx) }
@@ -749,6 +777,149 @@ func (d *Device) applyBayConfig(cfg bayConfig) {
 func (d *Device) onLinkConfigReceived() {
 	d.linkConfigReceived = true
 	d.checkConfigComplete()
+}
+
+// PDUState returns the last PDU state this device reported, or nil.
+func (d *Device) PDUState() *PDUState {
+	d.remote.mu.Lock()
+	defer d.remote.mu.Unlock()
+	if d.pduState == nil {
+		return nil
+	}
+	v := *d.pduState
+	return &v
+}
+
+func (d *Device) setPDUState(st PDUState) {
+	changed := d.pduState == nil || *d.pduState != st
+	d.pduState = &st
+	if changed {
+		r := d.remote
+		d.notify(pick(r.callbacks.OnPDUStateChanged != nil, func() { r.callbacks.OnPDUStateChanged(d, st) }))
+	}
+}
+
+// SetupCompleted reports whether the mesh has marked this device set up. The
+// second return is false until a setup-status frame has arrived.
+func (d *Device) SetupCompleted() (bool, bool) {
+	d.remote.mu.Lock()
+	defer d.remote.mu.Unlock()
+	if d.setupDone == nil {
+		return false, false
+	}
+	return *d.setupDone, true
+}
+
+func (d *Device) setSetupCompleted(done bool) {
+	changed := d.setupDone == nil || *d.setupDone != done
+	d.setupDone = &done
+	if changed {
+		r := d.remote
+		d.notify(pick(r.callbacks.OnSetupStatusChanged != nil, func() { r.callbacks.OnSetupStatusChanged(d, done) }))
+	}
+}
+
+// InstallerID returns the installer id the mesh assigned, or nil.
+func (d *Device) InstallerID() *uint16 {
+	d.remote.mu.Lock()
+	defer d.remote.mu.Unlock()
+	if d.installerID == nil {
+		return nil
+	}
+	v := *d.installerID
+	return &v
+}
+
+func (d *Device) setInstallerID(id uint16) {
+	changed := d.installerID == nil || *d.installerID != id
+	d.installerID = &id
+	if changed {
+		r := d.remote
+		d.notify(pick(r.callbacks.OnInstallerIDChanged != nil, func() { r.callbacks.OnInstallerIDChanged(d, id) }))
+	}
+}
+
+// Tiling returns the window this sink is currently told to show, or nil.
+func (d *Device) Tiling() *V2IPTilingConfig {
+	d.remote.mu.Lock()
+	defer d.remote.mu.Unlock()
+	if d.tiling == nil {
+		return nil
+	}
+	v := *d.tiling
+	return &v
+}
+
+func (d *Device) setTiling(cfg V2IPTilingConfig) {
+	changed := d.tiling == nil || *d.tiling != cfg
+	d.tiling = &cfg
+	if changed {
+		r := d.remote
+		d.notify(pick(r.callbacks.OnTilingChanged != nil, func() { r.callbacks.OnTilingChanged(d, cfg) }))
+	}
+}
+
+// RCSettings returns this device's remote-control configuration, or nil.
+func (d *Device) RCSettings() *RCSettings {
+	d.remote.mu.Lock()
+	defer d.remote.mu.Unlock()
+	if d.rcSettings == nil {
+		return nil
+	}
+	v := *d.rcSettings
+	return &v
+}
+
+func (d *Device) setRCSettings(s RCSettings) {
+	changed := d.rcSettings == nil || *d.rcSettings != s
+	d.rcSettings = &s
+	if changed {
+		r := d.remote
+		d.notify(pick(r.callbacks.OnRCSettingsChanged != nil, func() { r.callbacks.OnRCSettingsChanged(d, s) }))
+	}
+}
+
+// AudioSourceSelection returns the last audio input-selection change this
+// device reported, or nil. AudioSelectInput is the command that requests one.
+func (d *Device) AudioSourceSelection() *AudioChangeSource {
+	d.remote.mu.Lock()
+	defer d.remote.mu.Unlock()
+	if d.audioSelect == nil {
+		return nil
+	}
+	v := *d.audioSelect
+	return &v
+}
+
+func (d *Device) setAudioSelectInput(ch AudioChangeSource) {
+	changed := d.audioSelect == nil || *d.audioSelect != ch
+	d.audioSelect = &ch
+	if changed {
+		r := d.remote
+		d.notify(pick(r.callbacks.OnAudioSelectInput != nil, func() { r.callbacks.OnAudioSelectInput(d, ch) }))
+	}
+}
+
+// emitAudioParam fires the callback for a per-endpoint audio notification.
+// Mute and trigger carry a boolean in the low bit of the same u32 that volume
+// uses for a level.
+func (d *Device) emitAudioParam(op uint16, endpoint int, value uint32) {
+	r := d.remote
+	switch op {
+	case audioOpMute:
+		if r.callbacks.OnAudioEndpointMute != nil {
+			r.emit(func() { r.callbacks.OnAudioEndpointMute(d, endpoint, value != 0) })
+		}
+	case audioOpTrigger:
+		if r.callbacks.OnAudioEndpointTrigger != nil {
+			r.emit(func() { r.callbacks.OnAudioEndpointTrigger(d, endpoint, value != 0) })
+		}
+	case audioOpVolume:
+		if r.callbacks.OnAudioEndpointVolume != nil {
+			r.emit(func() { r.callbacks.OnAudioEndpointVolume(d, endpoint, value) })
+		}
+	}
+	d.emitSelf()
 }
 
 func (d *Device) setV2IPSources(sources []V2IPStreamSources) {

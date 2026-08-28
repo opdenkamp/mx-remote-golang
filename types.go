@@ -226,19 +226,213 @@ func (f V2IPAudioFormat) String() string {
 
 // V2IPScalingSettings holds a V2IP output's scaling mode, refresh rate and flags.
 type V2IPScalingSettings struct {
-	Mode    uint16
+	Mode    MxrSignalType
 	Refresh uint16
 	Flags   uint8
 }
 
+// Scaling config flags. The two validity bits say which half of a scaling
+// config a frame actually carries. Only these three bits are defined: bits
+// 2..6 carry no meaning and are not reliably zero on the wire.
+const (
+	ScalingFlagModeValid    uint8 = 1 << 0
+	ScalingFlagOptionsValid uint8 = 1 << 1
+	ScalingFlagAutoScaling  uint8 = 1 << 7
+)
+
+// merge folds a received scaling config onto the cached one, field by field.
+//
+// A write carries the mode or the options alone, so taking the block wholesale
+// would drop whichever half was not being written. The options branch replaces
+// the option bit rather than adding to it, which is what lets an options-only
+// write clear ScalingFlagAutoScaling.
+//
+// Only bit 7 is carried, not the whole top nibble. Firmware predating the fix
+// builds this frame from an uninitialised stack local and ORs its flags onto
+// whatever was there, so bits 2..6 are undefined noise on any receiver-capable
+// unit. Copying the nibble - which is what the firmware's own receiver does -
+// would cache that noise as though it meant something.
+func (s V2IPScalingSettings) merge(previous V2IPScalingSettings) V2IPScalingSettings {
+	out := previous
+	if s.Flags&ScalingFlagModeValid != 0 {
+		out.Mode = s.Mode
+		out.Refresh = s.Refresh
+		out.Flags |= ScalingFlagModeValid
+	}
+	if s.Flags&ScalingFlagOptionsValid != 0 {
+		out.Flags &^= ScalingFlagAutoScaling
+		out.Flags |= ScalingFlagOptionsValid
+		out.Flags |= s.Flags & ScalingFlagAutoScaling
+	}
+	return out
+}
+
+// V2IPDscpConfig is the per-stream DSCP marking in a V2IP device configuration.
+//
+// A stream whose wire byte carries no V2IPDscpSet bit reads back as nil here.
+// Firmware treats the marking as all-or-nothing: it applies one only when all
+// three streams carry a value and otherwise falls back to V2IPDscpDefault, so
+// Complete reports which case a frame is in.
+type V2IPDscpConfig struct {
+	Video *uint8
+	Audio *uint8
+	Anc   *uint8
+}
+
+// Complete reports whether all three streams carry a marking, which is what
+// firmware requires before it applies one.
+func (d V2IPDscpConfig) Complete() bool {
+	return d.Video != nil && d.Audio != nil && d.Anc != nil
+}
+
+func (d V2IPDscpConfig) String() string {
+	if !d.Complete() {
+		return "no marking"
+	}
+	return fmt.Sprintf("video:%d audio:%d anc:%d", *d.Video, *d.Audio, *d.Anc)
+}
+
+// parseDscp decodes one dscp byte from a V2IP device-config options word, or
+// nil when the byte carries no marking.
+func parseDscp(raw uint8) *uint8 {
+	if raw&V2IPDscpSet == 0 {
+		return nil
+	}
+	v := raw & V2IPDscpMax
+	return &v
+}
+
 // DeviceV2IPDetails is the local encoder/decoder configuration of a V2IP device.
 type DeviceV2IPDetails struct {
-	Video   V2IPStreamSource
-	Audio   V2IPStreamSource
-	Anc     V2IPStreamSource
-	Arc     V2IPStreamSource
-	TxRate  uint8
+	Video V2IPStreamSource
+	Audio V2IPStreamSource
+	Anc   V2IPStreamSource
+	Arc   V2IPStreamSource
+
+	// TxRate is the encoder rate in units of 10Mb/s, or nil when the sender
+	// offered no rate. A rate-only write carries the rate on its own; every
+	// other controller write puts a value outside V2IPSourceRateMin..Max here,
+	// which firmware drops as invalid so that address-only and scaling writes
+	// leave the peer's rate alone.
+	TxRate *uint8
+
+	Dscp    V2IPDscpConfig
 	Scaling V2IPScalingSettings
+}
+
+// Valid reports whether a stream source carries a usable address: a multicast
+// IP and a non-zero port, both (firmware mxr_v2ip_stream_valid).
+func (s V2IPStreamSource) Valid() bool {
+	ip := net.ParseIP(s.IP)
+	return ip != nil && ip.To4() != nil && ip.IsMulticast() && s.Port != 0
+}
+
+// sourceValid reports whether the source block carries usable addresses.
+// Firmware requires video and anc; audio is optional and is carried with them.
+func (v DeviceV2IPDetails) sourceValid() bool {
+	return v.Video.Valid() && v.Anc.Valid()
+}
+
+// merge folds a received device configuration onto the cached one.
+//
+// Every field here is optional behind its own validity marker: the frame's
+// payload is zeroed before a sender fills in the one field it is writing, so a
+// controller writing a TX rate sends zeroed addresses and a controller writing
+// addresses sends an out-of-range rate. Firmware applies each field only behind
+// its own test, so replacing the whole cached config on every frame would make
+// the peer read back with its addresses, rate or marking gone.
+func (v DeviceV2IPDetails) merge(previous *DeviceV2IPDetails) DeviceV2IPDetails {
+	if previous == nil {
+		return v
+	}
+	if !v.sourceValid() {
+		v.Video, v.Audio, v.Anc = previous.Video, previous.Audio, previous.Anc
+	}
+	if !v.Arc.Valid() {
+		v.Arc = previous.Arc
+	}
+	if v.TxRate == nil {
+		v.TxRate = previous.TxRate
+	}
+	// firmware gates all three dscp bytes on the video byte's set bit alone,
+	// and stores whatever the other two carry
+	if v.Dscp.Video == nil {
+		v.Dscp = previous.Dscp
+	}
+	v.Scaling = v.Scaling.merge(previous.Scaling)
+	return v
+}
+
+// BaySignalDetails is what a bay signal status report carries beyond the
+// signal-detected flag and the human-readable signal type.
+type BaySignalDetails struct {
+	// FrameRate is in Hz, already corrected for a 1000/1001 clock.
+	FrameRate float64
+
+	// TmdsClock is the TMDS clock rate in Hz.
+	TmdsClock uint32
+
+	// Status is the bay status word from the report's bay block.
+	Status BayStatusMask
+
+	// Scaling is the signal type the bay is scaling to.
+	Scaling MxrSignalType
+
+	// ClockRate is the video clock rate in Hz.
+	ClockRate uint32
+}
+
+// MxrSignalType is the 2-byte mxr_signal_type carried in scaling configs and
+// bay signal reports.
+//
+// Byte 0 is the CTA-861 svd (0 when the signal is not HDMI); byte 1 packs
+// color:4 in the low nibble, then non_int:1 and bpp:3 in the top bits.
+type MxrSignalType uint16
+
+// signal type bpp indices; the field is an index, not a bit depth.
+const (
+	sigBppUnknown = 0
+	sigBppUnset   = 5
+)
+
+// Svd returns the CTA-861 short video descriptor, 0 when the signal is not HDMI.
+func (t MxrSignalType) Svd() int { return int(t & 0xFF) }
+
+// ColourSpace returns the colour space (see VideoColourSpace).
+func (t MxrSignalType) ColourSpace() int { return int(t>>8) & 0xF }
+
+// NonInteger reports a 1000/1001 frame rate.
+func (t MxrSignalType) NonInteger() bool { return t&(1<<12) != 0 }
+
+// BppIndex returns the raw bpp index as carried on the wire.
+func (t MxrSignalType) BppIndex() int { return int(t>>13) & 0x7 }
+
+// Bpp returns the bit depth the bpp index stands for, 0 when unknown or unset.
+func (t MxrSignalType) Bpp() int {
+	switch t.BppIndex() {
+	case 1:
+		return 8
+	case 2:
+		return 10
+	case 3:
+		return 12
+	case 4:
+		return 16
+	}
+	return sigBppUnknown
+}
+
+// IsSet reports whether the signal type carries anything but the unset sentinel.
+func (t MxrSignalType) IsSet() bool { return t.BppIndex() != sigBppUnset }
+
+func (t MxrSignalType) String() string {
+	if !t.IsSet() {
+		return "unset"
+	}
+	if bpp := t.Bpp(); bpp != 0 {
+		return fmt.Sprintf("svd %d, color %d, %dbpp", t.Svd(), t.ColourSpace(), bpp)
+	}
+	return fmt.Sprintf("svd %d, color %d", t.Svd(), t.ColourSpace())
 }
 
 // DeviceV2IPSink is the sink-side route a V2IP device is currently subscribed to.

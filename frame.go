@@ -13,6 +13,14 @@ const (
 	headerLen = 24
 	magic0    = 0x50 // 'P'
 	magic1    = 0x38 // '8'
+
+	// deviceNameLen and fwVersionLen are the widths of the fixed-size name
+	// fields on the wire (MXR_DEVICE_NAME_LEN, MXR_FW_VERSION_LEN). A value
+	// that fills the field leaves no room for a terminator, so read exactly the
+	// field width and only then cut at a NUL - scanning on runs into the
+	// neighbouring struct member.
+	deviceNameLen = 16
+	fwVersionLen  = 128
 )
 
 // frame is a decoded MX Remote wire frame: a 24-byte header followed by an
@@ -67,11 +75,18 @@ func (f *frame) remoteID() DeviceUID {
 func (f *frame) opcode() uint16     { return binary.LittleEndian.Uint16(f.data[20:22]) }
 func (f *frame) payloadLen() uint16 { return binary.LittleEndian.Uint16(f.data[22:24]) }
 
+// payload returns the frame payload, bounded by both the length the header
+// declares and the bytes that actually arrived: a truncated datagram can claim
+// more than it carries, and a padded one can carry more than it claims.
 func (f *frame) payload() []byte {
 	if len(f.data) <= headerLen {
 		return nil
 	}
-	return f.data[headerLen:]
+	end := headerLen + int(f.payloadLen())
+	if end > len(f.data) {
+		end = len(f.data)
+	}
+	return f.data[headerLen:end]
 }
 
 // Payload accessors. idx is relative to the start of the payload. Each returns
@@ -106,8 +121,9 @@ func (f *frame) u32(idx int) (uint32, bool) {
 	return binary.LittleEndian.Uint32(f.data[i:]), true
 }
 
-// str reads a NUL-terminated ASCII string. length<=0 reads to the end of the
-// payload; otherwise it reads at most length bytes (stopping at the first NUL).
+// str reads an ASCII string from a fixed-width field. length<=0 reads to the
+// end of the payload; otherwise it slices exactly length bytes and cuts there,
+// so a value filling its field never runs on into the next struct member.
 func (f *frame) str(idx, length int) (string, bool) {
 	start := headerLen + idx
 	if start < 0 || start > len(f.data) {
@@ -123,12 +139,7 @@ func (f *frame) str(idx, length int) (string, bool) {
 	} else {
 		raw = f.data[start:]
 	}
-	for i, c := range raw {
-		if c == 0 {
-			return string(raw[:i]), true
-		}
-	}
-	return string(raw), true
+	return cstr(raw), true
 }
 
 func (f *frame) uuid(idx int) (DeviceUID, bool) {

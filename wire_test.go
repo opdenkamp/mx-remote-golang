@@ -39,15 +39,15 @@ func TestHelloFrame(t *testing.T) {
 	payload = appendFixedStr(payload, Version, 16)
 	feat := uint32(FeatureManager)
 	payload = append(payload, byte(feat), byte(feat>>8), byte(feat>>16), byte(feat>>24))
-	got := hexOf(buildFrame(testUID, opSysHello, ProtocolVersion, payload))
-	want := "50382700000102030405060708090a0b0c0d0e0f000036002700546573744170700000000000000000005039534e303030303030303000000000312e312e30000000000000000000000000000800"
+	got := hexOf(buildFrame(testUID, opSysHello, protocolFor(opSysHello), payload))
+	want := "50380100000102030405060708090a0b0c0d0e0f000036002800546573744170700000000000000000005039534e303030303030303000000000312e332e30000000000000000000000000000800"
 	if got != want {
 		t.Fatalf("hello\n got=%s\nwant=%s", got, want)
 	}
 }
 
 func TestDiscoverFrame(t *testing.T) {
-	got := hexOf(buildFrame(testUID, opSysDiscover, 1, nil))
+	got := hexOf(buildFrame(testUID, opSysDiscover, protocolFor(opSysDiscover), nil))
 	want := "50380100000102030405060708090a0b0c0d0e0f01000000"
 	if got != want {
 		t.Fatalf("discover\n got=%s\nwant=%s", got, want)
@@ -59,8 +59,8 @@ func TestSetNameFrame(t *testing.T) {
 	payload := append([]byte(nil), testUID[:]...)
 	payload = append(payload, byte(port), byte(port>>8))
 	payload = appendFixedStr(payload, "Living Room", 16)
-	got := hexOf(buildFrame(testUID, opChangeBayName, 0x11, payload))
-	want := "50381100000102030405060708090a0b0c0d0e0f22002200000102030405060708090a0b0c0d0e0f05004c6976696e6720526f6f6d0000000000"
+	got := hexOf(buildFrame(testUID, opChangeBayName, protocolFor(opChangeBayName), payload))
+	want := "50380600000102030405060708090a0b0c0d0e0f22002200000102030405060708090a0b0c0d0e0f05004c6976696e6720526f6f6d0000000000"
 	if got != want {
 		t.Fatalf("setname\n got=%s\nwant=%s", got, want)
 	}
@@ -77,7 +77,7 @@ func TestVolumeSetFrame(t *testing.T) {
 	payload = append(payload, byte(port), byte(port>>8))
 	payload = append(payload, vol.wire()...)
 	payload = append(payload, 0, 0, 0)
-	got := hexOf(buildFrame(testUID, opAudioSetVolume, 0x11, payload))
+	got := hexOf(buildFrame(testUID, opAudioSetVolume, protocolFor(opAudioSetVolume), payload))
 	want := "50381100000102030405060708090a0b0c0d0e0f14001800000102030405060708090a0b0c0d0e0f0500282800000000"
 	if got != want {
 		t.Fatalf("volset\n got=%s\nwant=%s", got, want)
@@ -87,8 +87,8 @@ func TestVolumeSetFrame(t *testing.T) {
 func TestManualSourceSwitchFrame(t *testing.T) {
 	fmt := &V2IPAudioFormat{SampleRate: 48000, Channels: 2}
 	payload := buildV2IPManualSourceSwitch(testUID, "239.1.2.3", 50020, "239.1.2.4", 50022, "0.0.0.0", 0, fmt)
-	got := hexOf(buildFrame(testUID, opV2IPManualSrcSwitch, ProtocolVersion, payload))
-	want := "50382700000102030405060708090a0b0c0d0e0f24003000000102030405060708090a0b0c0d0e0fef01020364c30000ef01020466c30000000000000000000080bb000002000000"
+	got := hexOf(buildFrame(testUID, opV2IPManualSrcSwitch, protocolFor(opV2IPManualSrcSwitch), payload))
+	want := "50380700000102030405060708090a0b0c0d0e0f24003000000102030405060708090a0b0c0d0e0fef01020364c30000ef01020466c30000000000000000000080bb000002000000"
 	if got != want {
 		t.Fatalf("manualsw\n got=%s\nwant=%s", got, want)
 	}
@@ -98,16 +98,16 @@ func TestEdidFrame(t *testing.T) {
 	profile := Edid4KHDR71
 	payload := append([]byte(nil), testUID[:]...)
 	payload = append(payload, byte(profile), byte(profile>>8), 0, 0, 0, 0, 0, 0)
-	got := hexOf(buildFrame(testUID, opBayEDIDProfile, ProtocolVersion, payload))
-	want := "50382700000102030405060708090a0b0c0d0e0f34001800000102030405060708090a0b0c0d0e0f0800000000000000"
+	got := hexOf(buildFrame(testUID, opBayEDIDProfile, protocolFor(opBayEDIDProfile), payload))
+	want := "50380800000102030405060708090a0b0c0d0e0f34001800000102030405060708090a0b0c0d0e0f0800000000000000"
 	if got != want {
 		t.Fatalf("edid\n got=%s\nwant=%s", got, want)
 	}
 }
 
 func TestRebootFrame(t *testing.T) {
-	got := hexOf(buildFrame(testUID, opSysReboot, ProtocolVersion, testUID[:]))
-	want := "50382700000102030405060708090a0b0c0d0e0f28001000000102030405060708090a0b0c0d0e0f"
+	got := hexOf(buildFrame(testUID, opSysReboot, protocolFor(opSysReboot), testUID[:]))
+	want := "50380100000102030405060708090a0b0c0d0e0f28001000000102030405060708090a0b0c0d0e0f"
 	if got != want {
 		t.Fatalf("reboot\n got=%s\nwant=%s", got, want)
 	}
@@ -117,8 +117,8 @@ func TestRCActionFrame(t *testing.T) {
 	port, action := 5, ActionPowerOn
 	payload := append([]byte(nil), testUID[:]...)
 	payload = append(payload, byte(port), byte(port>>8), byte(action), byte(uint16(action)>>8))
-	got := hexOf(buildFrame(testUID, opRCTxAction, ProtocolVersion, payload))
-	want := "50382700000102030405060708090a0b0c0d0e0f0e001400000102030405060708090a0b0c0d0e0f05000100"
+	got := hexOf(buildFrame(testUID, opRCTxAction, protocolFor(opRCTxAction), payload))
+	want := "50380c00000102030405060708090a0b0c0d0e0f0e001400000102030405060708090a0b0c0d0e0f05000100"
 	if got != want {
 		t.Fatalf("rcaction\n got=%s\nwant=%s", got, want)
 	}
@@ -136,12 +136,12 @@ func TestMultiviewerTxFrames(t *testing.T) {
 }
 
 func TestAudioTxFrames(t *testing.T) {
-	mute := hexOf(buildFrame(testUID, opV2IPAudio, ProtocolVersion, append(audioCmdHeader(audioOpMute, testUID), audioParam(3, 1)...)))
-	if want := "50382700000102030405060708090a0b0c0d0e0f43001c0001000000000102030405060708090a0b0c0d0e0f0300000001000000"; mute != want {
+	mute := hexOf(buildFrame(testUID, opV2IPAudio, protocolFor(opV2IPAudio), append(audioCmdHeader(audioOpMute, testUID), audioParam(3, 1)...)))
+	if want := "50381a00000102030405060708090a0b0c0d0e0f43001c0001000000000102030405060708090a0b0c0d0e0f0300000001000000"; mute != want {
 		t.Fatalf("audio mute\n got=%s\nwant=%s", mute, want)
 	}
-	vol := hexOf(buildFrame(testUID, opV2IPAudio, ProtocolVersion, append(audioCmdHeader(audioOpVolume, testUID), audioParam(5, 80)...)))
-	if want := "50382700000102030405060708090a0b0c0d0e0f43001c0004000000000102030405060708090a0b0c0d0e0f0500000050000000"; vol != want {
+	vol := hexOf(buildFrame(testUID, opV2IPAudio, protocolFor(opV2IPAudio), append(audioCmdHeader(audioOpVolume, testUID), audioParam(5, 80)...)))
+	if want := "50381a00000102030405060708090a0b0c0d0e0f43001c0004000000000102030405060708090a0b0c0d0e0f0500000050000000"; vol != want {
 		t.Fatalf("audio vol\n got=%s\nwant=%s", vol, want)
 	}
 }
@@ -154,7 +154,7 @@ func TestAmpZoneSettingsTxFrame(t *testing.T) {
 		EQLeft:  [5]int{1, 2, 3, 4, 5},
 		EQRight: [5]int{6, 7, 8, 9, 10},
 	}
-	got := hexOf(buildFrame(testUID, opAmpZoneSettings, 0x1C, buildAmpZoneSettings(testUID, 5, s)))
+	got := hexOf(buildFrame(testUID, opAmpZoneSettings, protocolFor(opAmpZoneSettings), buildAmpZoneSettings(testUID, 5, s)))
 	want := "50381c00000102030405060708090a0b0c0d0e0f3d003800000102030405060708090a0b0c0d0e0f05000a0b00640500000006000000000003040102070000002c0100000102030405060708090a0000"
 	if got != want {
 		t.Fatalf("ampzone\n got=%s\nwant=%s", got, want)
@@ -163,8 +163,8 @@ func TestAmpZoneSettingsTxFrame(t *testing.T) {
 
 func TestStatsRequestTxFrame(t *testing.T) {
 	payload := append(append([]byte(nil), testUID[:]...), 1)
-	got := hexOf(buildFrame(testUID, opV2IPStats, ProtocolVersion, payload))
-	want := "50382700000102030405060708090a0b0c0d0e0f3f001100000102030405060708090a0b0c0d0e0f01"
+	got := hexOf(buildFrame(testUID, opV2IPStats, protocolFor(opV2IPStats), payload))
+	want := "50381300000102030405060708090a0b0c0d0e0f3f001100000102030405060708090a0b0c0d0e0f01"
 	if got != want {
 		t.Fatalf("statsreq\n got=%s\nwant=%s", got, want)
 	}
