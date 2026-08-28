@@ -433,10 +433,6 @@ func mvCmdPayload(target DeviceUID, op byte, args ...byte) []byte {
 func (m *Multiviewer) cmd(op byte, args ...byte) error {
 	r := m.dev.remote
 	r.mu.Lock()
-	if err := m.dev.requireOpcodeLocked(opV2IPMultiviewer); err != nil {
-		r.mu.Unlock()
-		return err
-	}
 	if !m.dev.isOneipMultiviewer() {
 		r.mu.Unlock()
 		return fmt.Errorf("%s is not a multiviewer", m.dev.serialLocked())
@@ -446,7 +442,7 @@ func (m *Multiviewer) cmd(op byte, args ...byte) error {
 	// stamped above this opcode's 0x16 minimum, matching the reference library.
 	// MatrixOS has no handler for it - the multiviewer module owns the opcode - so
 	// the format an 0x16..0x1F receiver expects here is unverified.
-	_, err := r.transmit(buildFrame(uid, opV2IPMultiviewer, 0x20, mvCmdPayload(target, op, args...)))
+	_, err := r.transmit(m.dev, buildFrame(uid, opV2IPMultiviewer, 0x20, mvCmdPayload(target, op, args...)))
 	return err
 }
 

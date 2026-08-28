@@ -620,9 +620,14 @@ func TestEveryGuardedSendChecksTheProtocolFloor(t *testing.T) {
 	feed := feeder(r, old)
 	feed(opSysHello, helloPayload(0x01, "OldUnit", "OLD0001", "1.0.0",
 		FeatureV2IPSink|FeatureMultiviewer|FeatureAudioAmplifier|FeatureVideoRouting))
+	// The gate now sits at the send, so every method here has to get far enough
+	// to transmit: the sink bay is a real V2IP sink and the device advertises
+	// stream addresses, or the V2IP methods would fail their own preconditions
+	// before reaching it and the test would prove nothing about the gate.
 	feed(opSysBayConfig, append(
-		bayConfigRec(1, 0, 0, "Input 1", "Apple TV", 0, BayHDMIIn),
-		bayConfigRec(2, 1, 0, "Output 1", "TV", 0, BayHDMIOut|BayAudioAmpOut)...))
+		bayConfigRec(1, 0, 0, "Input 1", "Apple TV", 0, BayHDMIIn|BayV2IPSourceLocal),
+		bayConfigRec(2, 1, 0, "Output 1", "TV", 0, BayHDMIOut|BayAudioAmpOut|BayV2IPSinkLocal)...))
+	feed(opSysBayV2IPSources, streamRec(old, "239.7.7.1", "239.7.7.2", "239.7.7.3", V2IPPortVideo))
 
 	dev := r.GetByUID(old)
 	in, out := dev.GetByPortnum(1), dev.GetByPortnum(2)
@@ -690,8 +695,9 @@ func TestEveryGuardedSendChecksTheProtocolFloor(t *testing.T) {
 	cf(opSysHello, helloPayload(0x28, "NewUnit", "NEW0001", "4.8.0",
 		FeatureV2IPSink|FeatureMultiviewer|FeatureAudioAmplifier|FeatureVideoRouting))
 	cf(opSysBayConfig, append(
-		bayConfigRec(1, 0, 0, "Input 1", "Apple TV", 0, BayHDMIIn),
-		bayConfigRec(2, 1, 0, "Output 1", "TV", 0, BayHDMIOut|BayAudioAmpOut)...))
+		bayConfigRec(1, 0, 0, "Input 1", "Apple TV", 0, BayHDMIIn|BayV2IPSourceLocal),
+		bayConfigRec(2, 1, 0, "Output 1", "TV", 0, BayHDMIOut|BayAudioAmpOut|BayV2IPSinkLocal)...))
+	cf(opSysBayV2IPSources, streamRec(cur, "239.8.8.1", "239.8.8.2", "239.8.8.3", V2IPPortVideo))
 	newDev := r.GetByUID(cur)
 	newMV := newDev.Multiviewer()
 	if newMV == nil {
@@ -720,5 +726,30 @@ func TestProtocolFloorBoundary(t *testing.T) {
 	}
 	if err := dev.ReadStats(true); !errors.Is(err, ErrProtocolTooOld) {
 		t.Errorf("stats one above the device's version = %v, want ErrProtocolTooOld", err)
+	}
+}
+
+// The gate lives at the single point every frame passes through, so it is
+// tested there directly as well as through the methods. A send that skips it
+// cannot be written: transmit takes the target as a parameter, so omitting the
+// decision is a compile error rather than a silent hole.
+func TestTransmitGatesAtTheChokePoint(t *testing.T) {
+	r := newTestRemote(Callbacks{})
+	oldDev, newDev := uidN(170), uidN(171)
+	feeder(r, oldDev)(opSysHello, helloPayload(0x01, "Old", "OLD1", "1.0.0", FeatureAudioAmplifier))
+	feeder(r, newDev)(opSysHello, helloPayload(0x28, "New", "NEW1", "4.8.0", FeatureAudioAmplifier))
+
+	frame := buildFrame(r.UID(), opAmpZoneSettings, protocolFor(opAmpZoneSettings), make([]byte, 56))
+
+	if _, err := r.transmit(r.GetByUID(oldDev), frame); !errors.Is(err, ErrProtocolTooOld) {
+		t.Fatalf("old target: got %v, want ErrProtocolTooOld", err)
+	}
+	// a current target and an untargeted broadcast both get past the gate and
+	// fail later for want of a socket, which is a different error
+	if _, err := r.transmit(r.GetByUID(newDev), frame); errors.Is(err, ErrProtocolTooOld) {
+		t.Fatalf("current target was refused: %v", err)
+	}
+	if _, err := r.transmit(nil, frame); errors.Is(err, ErrProtocolTooOld) {
+		t.Fatalf("broadcast was refused: %v", err)
 	}
 }

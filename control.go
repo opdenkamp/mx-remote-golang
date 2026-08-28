@@ -51,10 +51,6 @@ func buildV2IPManualSourceSwitch(target DeviceUID, videoIP string, videoPort int
 func (b *Bay) SelectVideoSource(port int) error {
 	r := b.dev.remote
 	r.mu.Lock()
-	if err := b.dev.requireOpcodeLocked(opV2IPSourceSwitch); err != nil {
-		r.mu.Unlock()
-		return err
-	}
 	if !b.isOutput() {
 		r.mu.Unlock()
 		return fmt.Errorf("%s is not an output bay", b.portName)
@@ -76,7 +72,7 @@ func (b *Bay) SelectVideoSource(port int) error {
 	payload := buildV2IPSourceSwitch(b.dev.uid, stream.Video.IP, "")
 	uid := r.uid
 	r.mu.Unlock()
-	_, err := r.transmit(buildFrame(uid, opV2IPSourceSwitch, protocolFor(opV2IPSourceSwitch), payload))
+	_, err := r.transmit(b.dev, buildFrame(uid, opV2IPSourceSwitch, protocolFor(opV2IPSourceSwitch), payload))
 	return err
 }
 
@@ -85,10 +81,6 @@ func (b *Bay) SelectVideoSource(port int) error {
 func (b *Bay) SelectAudioSource(port int) error {
 	r := b.dev.remote
 	r.mu.Lock()
-	if err := b.dev.requireOpcodeLocked(opV2IPSourceSwitch); err != nil {
-		r.mu.Unlock()
-		return err
-	}
 	if !b.isV2IPSink() {
 		r.mu.Unlock()
 		return fmt.Errorf("audio routing is only supported on V2IP sinks")
@@ -106,7 +98,7 @@ func (b *Bay) SelectAudioSource(port int) error {
 	payload := buildV2IPSourceSwitch(b.dev.uid, "", stream.Audio.IP)
 	uid := r.uid
 	r.mu.Unlock()
-	_, err := r.transmit(buildFrame(uid, opV2IPSourceSwitch, protocolFor(opV2IPSourceSwitch), payload))
+	_, err := r.transmit(b.dev, buildFrame(uid, opV2IPSourceSwitch, protocolFor(opV2IPSourceSwitch), payload))
 	return err
 }
 
@@ -116,10 +108,6 @@ func (b *Bay) SelectAudioSource(port int) error {
 func (b *Bay) SelectAudioSourceAddr(audioIP string, audioPort int, fmt *V2IPAudioFormat) error {
 	r := b.dev.remote
 	r.mu.Lock()
-	if err := b.dev.requireOpcodeLocked(opV2IPManualSrcSwitch); err != nil {
-		r.mu.Unlock()
-		return err
-	}
 	if !b.isV2IPSink() {
 		r.mu.Unlock()
 		return errNotV2IPSink
@@ -131,7 +119,7 @@ func (b *Bay) SelectAudioSourceAddr(audioIP string, audioPort int, fmt *V2IPAudi
 		audioPort = V2IPPortAudio
 	}
 	payload := buildV2IPManualSourceSwitch(target, "0.0.0.0", 0, audioIP, audioPort, "0.0.0.0", 0, fmt)
-	_, err := r.transmit(buildFrame(uid, opV2IPManualSrcSwitch, protocolFor(opV2IPManualSrcSwitch), payload))
+	_, err := r.transmit(b.dev, buildFrame(uid, opV2IPManualSrcSwitch, protocolFor(opV2IPManualSrcSwitch), payload))
 	return err
 }
 
@@ -144,17 +132,13 @@ func (b *Bay) SetName(name string) error {
 	}
 	r := b.dev.remote
 	r.mu.Lock()
-	if err := b.dev.requireOpcodeLocked(opChangeBayName); err != nil {
-		r.mu.Unlock()
-		return err
-	}
 	payload := make([]byte, 0, 34)
 	payload = append(payload, b.dev.uid[:]...)
 	payload = append(payload, byte(b.portNumber), byte(b.portNumber>>8))
 	payload = appendFixedStr(payload, name, 16)
 	uid := r.uid
 	r.mu.Unlock()
-	if _, err := r.transmit(buildFrame(uid, opChangeBayName, protocolFor(opChangeBayName), payload)); err != nil {
+	if _, err := r.transmit(b.dev, buildFrame(uid, opChangeBayName, protocolFor(opChangeBayName), payload)); err != nil {
 		return err
 	}
 	r.runLocked(func() { b.setUserName(name) })
@@ -165,10 +149,6 @@ func (b *Bay) SetName(name string) error {
 func (b *Bay) SetHidden(hidden bool) error {
 	r := b.dev.remote
 	r.mu.Lock()
-	if err := b.dev.requireOpcodeLocked(opBayHide); err != nil {
-		r.mu.Unlock()
-		return err
-	}
 	payload := make([]byte, 0, 24)
 	payload = append(payload, b.dev.uid[:]...)
 	payload = append(payload, byte(b.portNumber), byte(b.portNumber>>8))
@@ -180,7 +160,7 @@ func (b *Bay) SetHidden(hidden bool) error {
 	payload = append(payload, 0, 0, 0, 0, 0)
 	uid := r.uid
 	r.mu.Unlock()
-	if _, err := r.transmit(buildFrame(uid, opBayHide, protocolFor(opBayHide), payload)); err != nil {
+	if _, err := r.transmit(b.dev, buildFrame(uid, opBayHide, protocolFor(opBayHide), payload)); err != nil {
 		return err
 	}
 	status := Visible
@@ -195,17 +175,13 @@ func (b *Bay) SetHidden(hidden bool) error {
 func (b *Bay) SelectEdidProfile(profile EdidProfile) error {
 	r := b.dev.remote
 	r.mu.Lock()
-	if err := b.dev.requireOpcodeLocked(opBayEDIDProfile); err != nil {
-		r.mu.Unlock()
-		return err
-	}
 	payload := make([]byte, 0, 24)
 	payload = append(payload, b.dev.uid[:]...)
 	payload = append(payload, byte(profile), byte(profile>>8))
 	payload = append(payload, 0, 0, 0, 0, 0, 0)
 	uid := r.uid
 	r.mu.Unlock()
-	if _, err := r.transmit(buildFrame(uid, opBayEDIDProfile, protocolFor(opBayEDIDProfile), payload)); err != nil {
+	if _, err := r.transmit(b.dev, buildFrame(uid, opBayEDIDProfile, protocolFor(opBayEDIDProfile), payload)); err != nil {
 		return err
 	}
 	r.runLocked(func() { b.setEdidProfile(int(profile)) })
@@ -216,16 +192,12 @@ func (b *Bay) SelectEdidProfile(profile EdidProfile) error {
 func (b *Bay) TxAction(action RCAction) error {
 	r := b.dev.remote
 	r.mu.Lock()
-	if err := b.dev.requireOpcodeLocked(opRCTxAction); err != nil {
-		r.mu.Unlock()
-		return err
-	}
 	payload := make([]byte, 0, 20)
 	payload = append(payload, b.dev.uid[:]...)
 	payload = append(payload, byte(b.portNumber), byte(b.portNumber>>8), byte(action), byte(uint16(action)>>8))
 	uid := r.uid
 	r.mu.Unlock()
-	_, err := r.transmit(buildFrame(uid, opRCTxAction, protocolFor(opRCTxAction), payload))
+	_, err := r.transmit(b.dev, buildFrame(uid, opRCTxAction, protocolFor(opRCTxAction), payload))
 	return err
 }
 
@@ -233,10 +205,6 @@ func (b *Bay) TxAction(action RCAction) error {
 func (b *Bay) VolumeSet(volume int, muted *bool) error {
 	r := b.dev.remote
 	r.mu.Lock()
-	if err := b.dev.requireOpcodeLocked(opAudioSetVolume); err != nil {
-		r.mu.Unlock()
-		return err
-	}
 	if !b.hasVolumeControl() {
 		r.mu.Unlock()
 		return fmt.Errorf("volume control not supported by %s", b.portName)
@@ -254,7 +222,7 @@ func (b *Bay) VolumeSet(volume int, muted *bool) error {
 	payload = append(payload, 0, 0, 0)
 	uid := r.uid
 	r.mu.Unlock()
-	if _, err := r.transmit(buildFrame(uid, opAudioSetVolume, protocolFor(opAudioSetVolume), payload)); err != nil {
+	if _, err := r.transmit(b.dev, buildFrame(uid, opAudioSetVolume, protocolFor(opAudioSetVolume), payload)); err != nil {
 		return err
 	}
 	r.runLocked(func() { b.setVolumeStatus(vol) })
@@ -325,15 +293,6 @@ func (b *Bay) SelectVideoSourceByUserName(name string) error {
 func (b *Bay) SelectAudioSourceByName(name string, format *V2IPAudioFormat) error {
 	r := b.dev.remote
 	r.mu.Lock()
-	// this one sends its address two ways, so gate on whichever it will use
-	op := opV2IPSourceSwitch
-	if format != nil {
-		op = opV2IPManualSrcSwitch
-	}
-	if err := b.dev.requireOpcodeLocked(op); err != nil {
-		r.mu.Unlock()
-		return err
-	}
 	if !b.isV2IPSink() {
 		r.mu.Unlock()
 		return errNotV2IPSink
@@ -354,11 +313,11 @@ func (b *Bay) SelectAudioSourceByName(name string, format *V2IPAudioFormat) erro
 
 	if format != nil {
 		payload := buildV2IPManualSourceSwitch(target, "0.0.0.0", 0, audioIP, audioPort, "0.0.0.0", 0, format)
-		_, err := r.transmit(buildFrame(uid, opV2IPManualSrcSwitch, protocolFor(opV2IPManualSrcSwitch), payload))
+		_, err := r.transmit(b.dev, buildFrame(uid, opV2IPManualSrcSwitch, protocolFor(opV2IPManualSrcSwitch), payload))
 		return err
 	}
 	payload := buildV2IPSourceSwitch(target, "", audioIP)
-	_, err := r.transmit(buildFrame(uid, opV2IPSourceSwitch, protocolFor(opV2IPSourceSwitch), payload))
+	_, err := r.transmit(b.dev, buildFrame(uid, opV2IPSourceSwitch, protocolFor(opV2IPSourceSwitch), payload))
 	return err
 }
 
@@ -379,13 +338,9 @@ func audioParam(endpointID, param int) []byte {
 func (d *Device) sendAudio(payload []byte) error {
 	r := d.remote
 	r.mu.Lock()
-	if err := d.requireOpcodeLocked(opV2IPAudio); err != nil {
-		r.mu.Unlock()
-		return err
-	}
 	uid := r.uid
 	r.mu.Unlock()
-	_, err := r.transmit(buildFrame(uid, opV2IPAudio, protocolFor(opV2IPAudio), payload))
+	_, err := r.transmit(d, buildFrame(uid, opV2IPAudio, protocolFor(opV2IPAudio), payload))
 	return err
 }
 
@@ -429,14 +384,10 @@ func (d *Device) AudioSelectInput(sinkEP *AudioEndpoint, source DeviceUID, sourc
 func (b *Bay) SetZoneSettings(s AmpZoneSettings) error {
 	r := b.dev.remote
 	r.mu.Lock()
-	if err := b.dev.requireOpcodeLocked(opAmpZoneSettings); err != nil {
-		r.mu.Unlock()
-		return err
-	}
 	payload := buildAmpZoneSettings(b.dev.uid, b.portNumber, s)
 	uid := r.uid
 	r.mu.Unlock()
-	if _, err := r.transmit(buildFrame(uid, opAmpZoneSettings, protocolFor(opAmpZoneSettings), payload)); err != nil {
+	if _, err := r.transmit(b.dev, buildFrame(uid, opAmpZoneSettings, protocolFor(opAmpZoneSettings), payload)); err != nil {
 		return err
 	}
 	r.runLocked(func() { b.setAmpSettings(s) })
@@ -447,10 +398,6 @@ func (b *Bay) SetZoneSettings(s AmpZoneSettings) error {
 func (d *Device) ReadStats(enable bool) error {
 	r := d.remote
 	r.mu.Lock()
-	if err := d.requireOpcodeLocked(opV2IPStats); err != nil {
-		r.mu.Unlock()
-		return err
-	}
 	payload := append([]byte(nil), d.uid[:]...)
 	if enable {
 		payload = append(payload, 1)
@@ -459,7 +406,7 @@ func (d *Device) ReadStats(enable bool) error {
 	}
 	uid := r.uid
 	r.mu.Unlock()
-	_, err := r.transmit(buildFrame(uid, opV2IPStats, protocolFor(opV2IPStats), payload))
+	_, err := r.transmit(d, buildFrame(uid, opV2IPStats, protocolFor(opV2IPStats), payload))
 	return err
 }
 
@@ -469,7 +416,7 @@ func (r *Remote) SendMonitoringPulse() error {
 	r.mu.Lock()
 	uid := r.uid
 	r.mu.Unlock()
-	_, err := r.transmit(buildFrame(uid, opSysMonitoringPulse, protocolFor(opSysMonitoringPulse), nil))
+	_, err := r.transmit(nil, buildFrame(uid, opSysMonitoringPulse, protocolFor(opSysMonitoringPulse), nil))
 	return err
 }
 
@@ -477,14 +424,10 @@ func (r *Remote) SendMonitoringPulse() error {
 func (d *Device) Reboot() error {
 	r := d.remote
 	r.mu.Lock()
-	if err := d.requireOpcodeLocked(opSysReboot); err != nil {
-		r.mu.Unlock()
-		return err
-	}
 	payload := append([]byte(nil), d.uid[:]...)
 	uid := r.uid
 	d.rebooting = true
 	r.mu.Unlock()
-	_, err := r.transmit(buildFrame(uid, opSysReboot, protocolFor(opSysReboot), payload))
+	_, err := r.transmit(d, buildFrame(uid, opSysReboot, protocolFor(opSysReboot), payload))
 	return err
 }

@@ -6,6 +6,7 @@ package mxremote
 import (
 	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -324,10 +325,29 @@ func (r *Remote) getByStreamIPLocked(ip string, audio bool) *Bay {
 }
 
 // transmit sends raw bytes to the target. Safe to call without the lock.
-func (r *Remote) transmit(data []byte) (int, error) {
+// transmit sends a frame, refusing one the target cannot receive.
+//
+// target names the device the frame is addressed to, or nil for a broadcast
+// with no single recipient. It is a parameter rather than something derived
+// here because the addressed device is a payload uid at an offset that differs
+// per opcode, while the opcode itself is at a fixed place in the header.
+//
+// The check lives here rather than at each call site on purpose: every frame
+// reaches the wire through this function and every frame is built by
+// buildFrame, so a send that skips the gate cannot be written by accident. An
+// earlier per-site version missed the one method that built its own frame
+// instead of delegating to a gated sibling.
+func (r *Remote) transmit(target *Device, data []byte) (int, error) {
 	r.mu.Lock()
 	c := r.conn
+	var err error
+	if target != nil && len(data) >= headerLen {
+		err = target.requireOpcodeLocked(binary.LittleEndian.Uint16(data[20:22]))
+	}
 	r.mu.Unlock()
+	if err != nil {
+		return 0, err
+	}
 	if c == nil {
 		return 0, fmt.Errorf("connection closed")
 	}
@@ -339,7 +359,7 @@ func (r *Remote) txDiscover() {
 	r.discoverTimeout = time.Now()
 	uid := r.uid
 	r.mu.Unlock()
-	_, _ = r.transmit(buildFrame(uid, opSysDiscover, protocolFor(opSysDiscover), nil))
+	_, _ = r.transmit(nil, buildFrame(uid, opSysDiscover, protocolFor(opSysDiscover), nil))
 }
 
 func (r *Remote) txHello() {
@@ -356,7 +376,7 @@ func (r *Remote) txHello() {
 	payload = appendFixedStr(payload, Version, 16)
 	feat := uint32(FeatureManager)
 	payload = append(payload, byte(feat), byte(feat>>8), byte(feat>>16), byte(feat>>24))
-	_, _ = r.transmit(buildFrame(uid, opSysHello, protocolFor(opSysHello), payload))
+	_, _ = r.transmit(nil, buildFrame(uid, opSysHello, protocolFor(opSysHello), payload))
 }
 
 func (r *Remote) receiveLoop(c *conn) {

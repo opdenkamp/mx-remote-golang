@@ -128,11 +128,18 @@ mutation took effect before running the suite, and treat a clean sweep from a
 tool that has never been shown to fail as unmeasured rather than clean.
 
 **Audit by walking the code, not by re-reading the list you believe you
-covered.** The one method that slipped the protocol gate was found by walking
-every `buildFrame` call out to its enclosing function; it was the single
-device-targeted method that built and sent its own frame while its siblings
-delegated to an already-gated one. `buildFrame` is the only frame constructor
-and every `transmit` takes its result, which is what makes that walk complete.
+covered** — and where the walk shows a choke point, put the check there rather
+than at each site. `buildFrame` is the only frame constructor and every frame
+reaches the wire through `Remote.transmit`, so the protocol gate lives in
+`transmit` and takes the target as a parameter. A send that skips the gate is
+therefore a compile error rather than an omission. The per-site version of this
+missed the one method that built its own frame while its siblings delegated to
+a gated one, and shipped.
+
+Note what that ordering costs: the gate now runs after each method's own
+preconditions, so a call that fails both reports the precondition. That is the
+more useful error, but it means a test has to drive a method far enough to
+actually transmit before it proves anything about the gate.
 
 **Every layer that asserts something can encode the same mistake — including
 the one added to catch it.** This has bitten in the decoder, in a fixture
