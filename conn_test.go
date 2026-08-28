@@ -6,6 +6,7 @@
 package mxremote
 
 import (
+	"encoding/binary"
 	"net"
 	"syscall"
 	"testing"
@@ -124,5 +125,84 @@ func TestMulticastFanout(t *testing.T) {
 	}
 	if ga != sent || gb != sent {
 		t.Fatalf("receive is partitioned rather than fanned out: %d and %d of %d sent", ga, gb, sent)
+	}
+}
+
+// The last layer: that a control method's frame actually reaches the socket.
+//
+// The transmit tap the round-trip tests use sits inside transmit, after the
+// protocol gate and before the write, so it proves what would be sent and not
+// that anything was. Between the tap and the wire sit a nil check and the
+// socket call, and "reported success for a frame never written" is a real
+// failure — the Python port had exactly that, from a length comparison that
+// could never match.
+//
+// The host's multicast loopback is proved with a probe first, deliberately. An
+// earlier version skipped when nothing arrived, which meant a library that sent
+// nothing produced a skip rather than a failure — the test could not fail in
+// the direction it was looking. Once the probe lands, silence is the library's.
+func TestControlMethodReachesTheSocket(t *testing.T) {
+	const group, port = "239.255.77.98", 18813
+
+	sender, err := newConn(group, port, "", "")
+	if err != nil {
+		t.Skipf("no usable multicast interface: %v", err)
+	}
+	defer sender.close()
+	listener, err := newConn(group, port, "", "")
+	if err != nil {
+		t.Fatalf("listener could not bind alongside: %v", err)
+	}
+	defer listener.close()
+
+	read := func(d time.Duration) []byte {
+		buf := make([]byte, 2048)
+		if err := listener.pc.SetReadDeadline(time.Now().Add(d)); err != nil {
+			return nil
+		}
+		n, _, err := listener.read(buf)
+		if err != nil {
+			return nil
+		}
+		return append([]byte(nil), buf[:n]...)
+	}
+
+	// does loopback work here at all? if not, skip for the host's reasons
+	probe := buildFrame(uidN(212), opSysDiscover, protocolFor(opSysDiscover), nil)
+	if _, err := sender.transmit(probe); err != nil {
+		t.Skipf("cannot transmit on this host: %v", err)
+	}
+	if read(2*time.Second) == nil {
+		t.Skip("no multicast loopback on this host, so a missing frame would be ambiguous")
+	}
+
+	r := newTestRemote(Callbacks{})
+	r.uid = uidN(210)
+	peer := uidN(211)
+	feed := feeder(r, peer)
+	feed(opSysHello, helloPayload(0x28, "FF88", "SK0001", "4.8.0", FeatureVideoRouting))
+	feed(opSysBayConfig, bayConfigRec(2, 1, 0, "Output 1", "TV", 0, BayHDMIOut))
+
+	r.mu.Lock()
+	r.conn = sender
+	r.mu.Unlock()
+
+	if err := r.GetByUID(peer).GetByPortnum(2).SetName("Kitchen"); err != nil {
+		t.Fatalf("send returned an error: %v", err)
+	}
+
+	got := read(2 * time.Second)
+	if got == nil {
+		t.Fatal("the method reported success but nothing reached the socket")
+	}
+	if len(got) < headerLen {
+		t.Fatalf("received %d bytes, too short for a frame", len(got))
+	}
+	if op := binary.LittleEndian.Uint16(got[20:22]); op != opChangeBayName {
+		t.Fatalf("opcode on the wire = %#02x, want %#02x", op, opChangeBayName)
+	}
+	// and it is the frame the method meant to send, not merely some frame
+	if name := cstr(got[headerLen+18 : headerLen+18+deviceNameLen]); name != "Kitchen" {
+		t.Fatalf("name on the wire = %q, want %q", name, "Kitchen")
 	}
 }

@@ -127,6 +127,14 @@ and checks each send, with the broadcast opcodes named explicitly. It also fails
 if its own pattern stops matching, since a regex that matches nothing reports
 every file clean.
 
+**A skip is not a pass, and a graceful degradation can hide the failure the
+test exists to catch.** The socket test skipped when nothing arrived, so a
+library that sent nothing produced a skip rather than a failure — the test could
+not fail in the direction it was looking. It now proves the host's multicast
+loopback with a probe first; once the probe lands, silence is the library's
+fault and the test fails. Where a test tolerates an environment, make the
+environment prove itself rather than inferring it from the absence of a result.
+
 **Fixtures fail by being too simple to reach the thing under test.** Zero
 padding hides a wrong field width; a bare bay fails a method's preconditions
 before it can reach the send being tested; a one-sided assertion passes for a
