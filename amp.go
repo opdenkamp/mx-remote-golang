@@ -26,8 +26,26 @@ func (b *Bay) setAmpSettings(s AmpZoneSettings) {
 	}
 }
 
+// Amp zone settings sizes and value range.
+const (
+	// ampZoneSettingsSize is sizeof(mxr_amp_zone_settings) on the wire.
+	ampZoneSettingsSize = 56
+
+	// AmpToneFlat is the neutral value for Bass, Treble and the EQ bands. They
+	// are raw unsigned bytes despite the firmware header describing a signed
+	// range; the device itself accepts only AmpToneMin..AmpToneMax.
+	AmpToneFlat = 128
+	AmpToneMin  = 104
+	AmpToneMax  = 140
+)
+
 // ampZoneTarget resolves the device an amp-settings frame applies to: the
 // payload UID, or the sender when that UID is zero.
+//
+// An amp never fills the target in: its transmit path leaves the field on the
+// zeroed payload and identifies itself through the frame header instead. So the
+// fallback is the normal path for device-originated frames, and the payload UID
+// is only set when a controller addresses a specific unit.
 func (r *Remote) ampZoneTarget(f *frame) *Device {
 	uid := mustUUID(f, 0)
 	if uid.Empty() {
@@ -42,7 +60,10 @@ func handleAmpZoneSettings(r *Remote, f *frame) {
 		return
 	}
 	p := f.payload()
-	if len(p) < 54 {
+	// The transmitter allocates sizeof(mxr_amp_zone_settings) and writes through
+	// a struct pointer, so the wire image is the compiler's layout including its
+	// padding and 2-byte tail: 56 bytes, not the 54 the fields occupy.
+	if len(p) < ampZoneSettingsSize {
 		return
 	}
 	zone, ok := f.u16(16)
@@ -64,12 +85,11 @@ func handleAmpZoneSettings(r *Remote, f *frame) {
 		// bytes ahead of the delays rather than behind them: bass at 32,
 		// power_auto_time at 40 and the eq bands at 44 and 49 all depend on it.
 		//
-		// Derived from the struct rather than measured. Both this library and
-		// the Python reference previously read 22 and 26 and wrote them there
-		// too, so a round trip agreed with itself while disagreeing with the
-		// amp. Awaiting an offsetof assertion or a captured frame; a delay that
-		// reads back as roughly two padding bytes plus half the real value, or
-		// one above 65535 samples wrapping, means revisit this first.
+		// Confirmed by offsetof compiled with the ProAmp8 toolchain. Both this
+		// library and the Python reference previously read 22 and 26 and wrote
+		// them there too, so a round trip agreed with itself while disagreeing
+		// with the amp. It survived because the padding is zero: reading at 22
+		// yields (delay & 0xFFFF) << 16, which is 0 for the 0 everybody had.
 		DelayLeft:    binary.LittleEndian.Uint32(p[24:28]),
 		DelayRight:   binary.LittleEndian.Uint32(p[28:32]),
 		Bass:         int(p[32]),

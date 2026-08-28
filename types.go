@@ -525,7 +525,13 @@ type NetworkPortStatus struct {
 	CableStatus    []UtpCableStatus
 }
 
-// AmpZoneSettings holds the per-zone settings of a ProAmp8 output.
+// AmpZoneSettings is a ProAmp8 zone's gain, delay, tone and power settings.
+//
+// Bass, Treble and the EQ bands are raw unsigned bytes with AmpToneFlat as
+// neutral, not signed values - the firmware header's "-104 to 152" is wrong at
+// both ends, and the device accepts only AmpToneMin..AmpToneMax. Gains are
+// int16 inside the amp but a byte on the mesh, so a frame cannot carry the
+// amp's full internal range.
 type AmpZoneSettings struct {
 	GainLeft     int
 	GainRight    int

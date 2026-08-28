@@ -123,7 +123,7 @@ func TestAmpAndStatsAndNetwork(t *testing.T) {
 	}
 
 	// amp zone settings for port 3
-	az := make([]byte, 54)
+	az := make([]byte, 56) // sizeof(mxr_amp_zone_settings), padding included
 	copy(az[0:16], sender[:])
 	binary.LittleEndian.PutUint16(az[16:18], 3) // zone = port 3
 	az[18], az[19] = 10, 11                     // gain l/r

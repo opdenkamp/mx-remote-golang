@@ -487,3 +487,47 @@ func TestAmpDolbyDecode(t *testing.T) {
 		t.Fatalf("dolby = %+v", d)
 	}
 }
+
+// The amp allocates sizeof(mxr_amp_zone_settings) and writes through a struct
+// pointer, so the wire image carries the compiler's padding and 2-byte tail.
+// A frame of only the 54 bytes the fields occupy is not one the amp sends.
+func TestAmpZoneSettingsRequiresFullStruct(t *testing.T) {
+	r := newTestRemote(Callbacks{})
+	sender := uidN(142)
+	feed := feeder(r, sender)
+	feed(opSysHello, helloPayload(0x28, "ProAmp8", "AMP0003", "4.8.0", FeatureAudioAmplifier))
+	feed(opSysBayConfig, bayConfigRec(4, 1, 0, "Zone 4", "Kitchen", 0, BayAudioAmpOut))
+
+	short := make([]byte, ampZoneSettingsSize-1)
+	copy(short[0:16], sender[:])
+	binary.LittleEndian.PutUint16(short[16:18], 4)
+	short[18] = 200
+	feed(opAmpZoneSettings, short)
+	if s := r.GetByUID(sender).GetByPortnum(4).AmpSettings(); s != nil {
+		t.Fatalf("a short frame was decoded: %+v", s)
+	}
+}
+
+// An amp leaves the payload target zeroed and identifies itself in the frame
+// header, so the fallback is the normal path rather than an edge case.
+func TestAmpSettingsWithZeroTargetUseTheSender(t *testing.T) {
+	r := newTestRemote(Callbacks{})
+	sender := uidN(143)
+	feed := feeder(r, sender)
+	feed(opSysHello, helloPayload(0x28, "ProAmp8", "AMP0004", "4.8.0", FeatureAudioAmplifier))
+	feed(opSysBayConfig, bayConfigRec(2, 1, 0, "Zone 2", "Study", 0, BayAudioAmpOut))
+
+	p := make([]byte, ampZoneSettingsSize) // target left all zero, as the amp sends it
+	binary.LittleEndian.PutUint16(p[16:18], 2)
+	p[18], p[19] = 190, 191
+	binary.LittleEndian.PutUint32(p[24:28], 48000)
+	feed(opAmpZoneSettings, p)
+
+	s := r.GetByUID(sender).GetByPortnum(2).AmpSettings()
+	if s == nil {
+		t.Fatal("a zero target should resolve to the sending device")
+	}
+	if s.GainLeft != 190 || s.DelayLeft != 48000 {
+		t.Fatalf("settings = %+v", s)
+	}
+}
