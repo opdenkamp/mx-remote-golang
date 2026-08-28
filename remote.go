@@ -64,6 +64,7 @@ type Remote struct {
 	broadcast bool
 
 	conn            *conn
+	txTap           func([]byte)
 	closing         bool
 	wg              sync.WaitGroup
 	lastHello       time.Time
@@ -340,6 +341,7 @@ func (r *Remote) getByStreamIPLocked(ip string, audio bool) *Bay {
 func (r *Remote) transmit(target *Device, data []byte) (int, error) {
 	r.mu.Lock()
 	c := r.conn
+	tap := r.txTap
 	var err error
 	if target != nil && len(data) >= headerLen {
 		err = target.requireOpcodeLocked(binary.LittleEndian.Uint16(data[20:22]))
@@ -347,6 +349,13 @@ func (r *Remote) transmit(target *Device, data []byte) (int, error) {
 	r.mu.Unlock()
 	if err != nil {
 		return 0, err
+	}
+	// A frame that passes the gate is what this library would put on the wire,
+	// so tests round-trip it back through the decoder from here. Most payloads
+	// are assembled inside their control method and cannot be reached any other
+	// way.
+	if tap != nil {
+		tap(data)
 	}
 	if c == nil {
 		return 0, fmt.Errorf("connection closed")

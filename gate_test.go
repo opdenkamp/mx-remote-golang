@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 // broadcastOpcodes are the sends with no single recipient, and so the only ones
@@ -131,6 +132,111 @@ func TestBuilderDecoderRoundTrip(t *testing.T) {
 		}
 		if sink.AudioFmt == nil || sink.AudioFmt.SampleRate != 96000 || sink.AudioFmt.Channels != 6 {
 			t.Errorf("audio format round trip = %+v", sink.AudioFmt)
+		}
+	})
+}
+
+// Round-tripping the control methods themselves, not just the payload builders
+// that happen to be separate functions. Most payloads are assembled inline in
+// the method that sends them, so capturing what actually goes to the wire is
+// the only way to feed it back through the decoder.
+//
+// Attempting this is itself an audit, and it surfaced two things about this
+// library that no other test here states. A captured frame carries our own uid
+// as its sender and processFrame drops those as echoes, so the harness has to
+// rewrite the sender to a peer — the library genuinely cannot decode its own
+// sends. And once it does, the handlers split: some act on the device named in
+// the payload, others on whoever sent the frame, so a round trip only proves
+// something if it asserts against the one the handler actually updates.
+func TestControlMethodsRoundTrip(t *testing.T) {
+	r := newTestRemote(Callbacks{})
+	target, peer := uidN(190), uidN(191)
+	bays := append(
+		bayConfigRec(1, 0, 0, "Input 1", "Apple TV", 0, BayHDMIIn),
+		bayConfigRec(2, 1, 0, "Output 1", "TV", 0, BayHDMIOut|BayAudioAmpOut)...)
+	for _, uid := range []DeviceUID{target, peer} {
+		f := feeder(r, uid)
+		f(opSysHello, helloPayload(0x28, "FF88", "RT"+string(rune('A'+uid[0]%26)), "4.8.0",
+			FeatureVideoRouting|FeatureAudioAmplifier))
+		f(opSysBayConfig, bays)
+	}
+
+	var sent [][]byte
+	r.mu.Lock()
+	r.txTap = func(b []byte) { sent = append(sent, append([]byte(nil), b...)) }
+	r.mu.Unlock()
+
+	dev := r.GetByUID(target)
+	in, out := dev.GetByPortnum(1), dev.GetByPortnum(2)
+	peerOut := r.GetByUID(peer).GetByPortnum(2)
+
+	// send, then replay the captured frame as though a peer controller had sent
+	// it: our own uid would be dropped as an echo
+	roundTrip := func(t *testing.T, do func() error) {
+		t.Helper()
+		sent = sent[:0]
+		if err := do(); err != nil && err.Error() != "connection closed" {
+			t.Fatalf("send failed for a reason other than the missing socket: %v", err)
+		}
+		if len(sent) != 1 {
+			t.Fatalf("expected exactly one frame, captured %d", len(sent))
+		}
+		frame := sent[0]
+		copy(frame[4:20], peer[:])
+		r.processFrame(frame, "10.8.8.9", time.Now())
+	}
+
+	// addressed by the uid in the payload
+	t.Run("SetName", func(t *testing.T) {
+		var got BayNameChange
+		r.mu.Lock()
+		r.callbacks.OnBayNameChangeRequested = func(_ *Device, c BayNameChange) { got = c }
+		r.mu.Unlock()
+		roundTrip(t, func() error { return out.SetName("Kitchen Amp") })
+		if got.Target != target || got.Port != 2 || got.Name != "Kitchen Amp" {
+			t.Fatalf("name round-tripped as %+v", got)
+		}
+	})
+
+	t.Run("SetHidden", func(t *testing.T) {
+		roundTrip(t, func() error { return out.SetHidden(true) })
+		if !out.Hidden() {
+			t.Fatal("hidden did not round trip onto the addressed bay")
+		}
+	})
+
+	t.Run("SelectEdidProfile", func(t *testing.T) {
+		var got EDIDProfileChange
+		r.mu.Lock()
+		r.callbacks.OnEDIDProfileChangeRequested = func(_ *Device, c EDIDProfileChange) { got = c }
+		r.mu.Unlock()
+		roundTrip(t, func() error { return in.SelectEdidProfile(Edid4KHDR71) })
+		if got.Target != target || got.Profile != Edid4KHDR71 {
+			t.Fatalf("edid profile round-tripped as %+v", got)
+		}
+	})
+
+	t.Run("TxAction", func(t *testing.T) {
+		var got ActionTransmitRequest
+		r.mu.Lock()
+		r.callbacks.OnActionTransmitRequested = func(_ *Device, q ActionTransmitRequest) { got = q }
+		r.mu.Unlock()
+		roundTrip(t, func() error { return out.TxAction(ActionPowerOn) })
+		if got.Target != target || got.Action != ActionPowerOn || got.LocalBay != 2 {
+			t.Fatalf("action round-tripped as %+v", got)
+		}
+	})
+
+	// keyed off whoever sent the frame, so it lands on the peer's bay
+	t.Run("VolumeSet", func(t *testing.T) {
+		f := false
+		roundTrip(t, func() error { return out.VolumeSet(37, &f) })
+		v := peerOut.VolumeStatus()
+		if v == nil || v.VolumeLeft != 37 {
+			t.Fatalf("volume round-tripped onto the sender's bay as %+v", v)
+		}
+		if ov := out.VolumeStatus(); ov != nil && ov.VolumeLeft == 37 {
+			t.Fatal("volume also landed on the addressed bay; this handler is sender-keyed")
 		}
 	})
 }
