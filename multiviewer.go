@@ -433,6 +433,10 @@ func mvCmdPayload(target DeviceUID, op byte, args ...byte) []byte {
 func (m *Multiviewer) cmd(op byte, args ...byte) error {
 	r := m.dev.remote
 	r.mu.Lock()
+	if err := m.dev.requireOpcodeLocked(opV2IPMultiviewer); err != nil {
+		r.mu.Unlock()
+		return err
+	}
 	if !m.dev.isOneipMultiviewer() {
 		r.mu.Unlock()
 		return fmt.Errorf("%s is not a multiviewer", m.dev.serialLocked())

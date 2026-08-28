@@ -51,6 +51,10 @@ func buildV2IPManualSourceSwitch(target DeviceUID, videoIP string, videoPort int
 func (b *Bay) SelectVideoSource(port int) error {
 	r := b.dev.remote
 	r.mu.Lock()
+	if err := b.dev.requireOpcodeLocked(opV2IPSourceSwitch); err != nil {
+		r.mu.Unlock()
+		return err
+	}
 	if !b.isOutput() {
 		r.mu.Unlock()
 		return fmt.Errorf("%s is not an output bay", b.portName)
@@ -81,6 +85,10 @@ func (b *Bay) SelectVideoSource(port int) error {
 func (b *Bay) SelectAudioSource(port int) error {
 	r := b.dev.remote
 	r.mu.Lock()
+	if err := b.dev.requireOpcodeLocked(opV2IPSourceSwitch); err != nil {
+		r.mu.Unlock()
+		return err
+	}
 	if !b.isV2IPSink() {
 		r.mu.Unlock()
 		return fmt.Errorf("audio routing is only supported on V2IP sinks")
@@ -108,6 +116,10 @@ func (b *Bay) SelectAudioSource(port int) error {
 func (b *Bay) SelectAudioSourceAddr(audioIP string, audioPort int, fmt *V2IPAudioFormat) error {
 	r := b.dev.remote
 	r.mu.Lock()
+	if err := b.dev.requireOpcodeLocked(opV2IPManualSrcSwitch); err != nil {
+		r.mu.Unlock()
+		return err
+	}
 	if !b.isV2IPSink() {
 		r.mu.Unlock()
 		return errNotV2IPSink
@@ -132,6 +144,10 @@ func (b *Bay) SetName(name string) error {
 	}
 	r := b.dev.remote
 	r.mu.Lock()
+	if err := b.dev.requireOpcodeLocked(opChangeBayName); err != nil {
+		r.mu.Unlock()
+		return err
+	}
 	payload := make([]byte, 0, 34)
 	payload = append(payload, b.dev.uid[:]...)
 	payload = append(payload, byte(b.portNumber), byte(b.portNumber>>8))
@@ -149,6 +165,10 @@ func (b *Bay) SetName(name string) error {
 func (b *Bay) SetHidden(hidden bool) error {
 	r := b.dev.remote
 	r.mu.Lock()
+	if err := b.dev.requireOpcodeLocked(opBayHide); err != nil {
+		r.mu.Unlock()
+		return err
+	}
 	payload := make([]byte, 0, 24)
 	payload = append(payload, b.dev.uid[:]...)
 	payload = append(payload, byte(b.portNumber), byte(b.portNumber>>8))
@@ -175,6 +195,10 @@ func (b *Bay) SetHidden(hidden bool) error {
 func (b *Bay) SelectEdidProfile(profile EdidProfile) error {
 	r := b.dev.remote
 	r.mu.Lock()
+	if err := b.dev.requireOpcodeLocked(opBayEDIDProfile); err != nil {
+		r.mu.Unlock()
+		return err
+	}
 	payload := make([]byte, 0, 24)
 	payload = append(payload, b.dev.uid[:]...)
 	payload = append(payload, byte(profile), byte(profile>>8))
@@ -192,6 +216,10 @@ func (b *Bay) SelectEdidProfile(profile EdidProfile) error {
 func (b *Bay) TxAction(action RCAction) error {
 	r := b.dev.remote
 	r.mu.Lock()
+	if err := b.dev.requireOpcodeLocked(opRCTxAction); err != nil {
+		r.mu.Unlock()
+		return err
+	}
 	payload := make([]byte, 0, 20)
 	payload = append(payload, b.dev.uid[:]...)
 	payload = append(payload, byte(b.portNumber), byte(b.portNumber>>8), byte(action), byte(uint16(action)>>8))
@@ -205,6 +233,10 @@ func (b *Bay) TxAction(action RCAction) error {
 func (b *Bay) VolumeSet(volume int, muted *bool) error {
 	r := b.dev.remote
 	r.mu.Lock()
+	if err := b.dev.requireOpcodeLocked(opAudioSetVolume); err != nil {
+		r.mu.Unlock()
+		return err
+	}
 	if !b.hasVolumeControl() {
 		r.mu.Unlock()
 		return fmt.Errorf("volume control not supported by %s", b.portName)
@@ -338,6 +370,10 @@ func audioParam(endpointID, param int) []byte {
 func (d *Device) sendAudio(payload []byte) error {
 	r := d.remote
 	r.mu.Lock()
+	if err := d.requireOpcodeLocked(opV2IPAudio); err != nil {
+		r.mu.Unlock()
+		return err
+	}
 	uid := r.uid
 	r.mu.Unlock()
 	_, err := r.transmit(buildFrame(uid, opV2IPAudio, protocolFor(opV2IPAudio), payload))
@@ -384,6 +420,10 @@ func (d *Device) AudioSelectInput(sinkEP *AudioEndpoint, source DeviceUID, sourc
 func (b *Bay) SetZoneSettings(s AmpZoneSettings) error {
 	r := b.dev.remote
 	r.mu.Lock()
+	if err := b.dev.requireOpcodeLocked(opAmpZoneSettings); err != nil {
+		r.mu.Unlock()
+		return err
+	}
 	payload := buildAmpZoneSettings(b.dev.uid, b.portNumber, s)
 	uid := r.uid
 	r.mu.Unlock()
@@ -398,6 +438,10 @@ func (b *Bay) SetZoneSettings(s AmpZoneSettings) error {
 func (d *Device) ReadStats(enable bool) error {
 	r := d.remote
 	r.mu.Lock()
+	if err := d.requireOpcodeLocked(opV2IPStats); err != nil {
+		r.mu.Unlock()
+		return err
+	}
 	payload := append([]byte(nil), d.uid[:]...)
 	if enable {
 		payload = append(payload, 1)
@@ -424,6 +468,10 @@ func (r *Remote) SendMonitoringPulse() error {
 func (d *Device) Reboot() error {
 	r := d.remote
 	r.mu.Lock()
+	if err := d.requireOpcodeLocked(opSysReboot); err != nil {
+		r.mu.Unlock()
+		return err
+	}
 	payload := append([]byte(nil), d.uid[:]...)
 	uid := r.uid
 	d.rebooting = true

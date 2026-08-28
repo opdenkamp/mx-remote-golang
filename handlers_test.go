@@ -5,6 +5,7 @@ package mxremote
 
 import (
 	"encoding/binary"
+	"errors"
 	"testing"
 )
 
@@ -555,5 +556,52 @@ func TestAmpToneOutsideHTTPBoundsIsNotClamped(t *testing.T) {
 	}
 	if s.Bass != AmpToneHTTPMax+12 || s.Treble != AmpToneHTTPMin-12 {
 		t.Fatalf("tone = %d/%d, want them reported unclamped", s.Bass, s.Treble)
+	}
+}
+
+// A receiver silently drops any frame stamped above its own protocol version,
+// so sending an opcode whose floor exceeds what a device reports is futile.
+// The call has to fail rather than succeed into a void.
+func TestSendRefusedBelowOpcodeFloor(t *testing.T) {
+	r := newTestRemote(Callbacks{})
+	old := uidN(150)
+	feed := feeder(r, old)
+	// a ProAmp8 on 4.1.1 reports 0x11, below the 0x1C floor of AMP_ZONE_SETTINGS
+	feed(opSysHello, helloPayload(0x11, "ProAmp8", "AMP4111", "4.1.1", FeatureAudioAmplifier))
+	feed(opSysBayConfig, bayConfigRec(1, 1, 0, "Zone 1", "Hall", 0, BayAudioAmpOut))
+
+	dev := r.GetByUID(old)
+	// errors.Is, not merely non-nil: a test Remote has no connection, so any
+	// send fails anyway and "non-nil" would pass with the check removed
+	if err := dev.GetByPortnum(1).SetZoneSettings(AmpZoneSettings{}); !errors.Is(err, ErrProtocolTooOld) {
+		t.Fatalf("amp zone settings to a 0x11 device = %v, want ErrProtocolTooOld", err)
+	}
+	// 0x3F V2IP_STATS has a floor of 0x13, also above this device
+	if err := dev.ReadStats(true); !errors.Is(err, ErrProtocolTooOld) {
+		t.Fatalf("stats request to a 0x11 device = %v, want ErrProtocolTooOld", err)
+	}
+	// 0x28 SYS_REBOOT floors at 0x01 and stays allowed
+	if err := dev.Reboot(); errors.Is(err, ErrProtocolTooOld) {
+		t.Fatalf("reboot should not be refused on protocol grounds: %v", err)
+	}
+
+	// a device that reported no version at all is allowed through: not knowing
+	// is not the same as knowing it is too old
+	unknown := uidN(152)
+	uf := feeder(r, unknown)
+	uf(opSysHello, helloPayload(0, "Unknown", "UNK0001", "0.0.0", FeatureAudioAmplifier))
+	uf(opSysBayConfig, bayConfigRec(1, 1, 0, "Zone 1", "Hall", 0, BayAudioAmpOut))
+	if err := r.GetByUID(unknown).GetByPortnum(1).SetZoneSettings(AmpZoneSettings{}); errors.Is(err, ErrProtocolTooOld) {
+		t.Fatalf("a device reporting no version should not be refused: %v", err)
+	}
+
+	// a device reporting a recent version is not refused
+	cur := uidN(151)
+	cf := feeder(r, cur)
+	cf(opSysHello, helloPayload(0x28, "ProAmp8", "AMP0480", "4.8.0", FeatureAudioAmplifier))
+	cf(opSysBayConfig, bayConfigRec(1, 1, 0, "Zone 1", "Hall", 0, BayAudioAmpOut))
+	err := r.GetByUID(cur).GetByPortnum(1).SetZoneSettings(AmpZoneSettings{})
+	if errors.Is(err, ErrProtocolTooOld) {
+		t.Fatalf("a 0x28 device should not be refused: %v", err)
 	}
 }

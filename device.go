@@ -4,6 +4,7 @@
 package mxremote
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -195,6 +196,31 @@ func (d *Device) isAmp() bool {
 
 func (d *Device) isOneipMultiviewer() bool {
 	return d.isV2IP() && d.hello.features.Has(FeatureMultiviewer)
+}
+
+// ErrProtocolTooOld is returned when a device's reported protocol version is
+// below the floor of the opcode a call would have to send. Test for it with
+// errors.Is to tell a refusal apart from a transmit failure.
+var ErrProtocolTooOld = errors.New("device protocol too old for this opcode")
+
+// requireOpcodeLocked reports whether this device can receive the opcode.
+//
+// A receiver drops any frame stamped above its own protocol version, silently
+// and with no NAK, so sending an opcode whose floor exceeds what the device
+// reports is futile rather than merely unsupported: the call would otherwise
+// succeed and nothing would happen. A ProAmp8 on 4.1.1 reports 0x11, which is
+// below the floor of several opcodes this library can send.
+//
+// A device that has not reported a version is allowed through - not knowing is
+// not the same as knowing it is too old.
+func (d *Device) requireOpcodeLocked(opcode uint16) error {
+	have := d.hello.supportedProtocol
+	need := protocolFor(opcode)
+	if have == 0 || have >= need {
+		return nil
+	}
+	return fmt.Errorf("%w: %s reports %#02x, opcode %#02x needs %#02x",
+		ErrProtocolTooOld, d.serialLocked(), have, opcode, need)
 }
 
 func (d *Device) configInitialised() bool {

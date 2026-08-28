@@ -81,6 +81,21 @@ fans into the generic `OnBayUpdate`/`OnDeviceUpdate` (see `Bay.notify` /
 `Device.notify`), mirroring the reference `MxrCallbacks` base methods. Public
 getters lock; `*Locked` helpers assume the lock is held.
 
+## Transmitting
+
+Check the target's reported protocol version before sending, not just the
+stamp. `Device.requireOpcodeLocked` refuses an opcode whose floor exceeds what
+the device advertised: a receiver drops such a frame silently, with no NAK at
+any layer, so the call would otherwise succeed while nothing happened. A
+ProAmp8 on 4.1.1 reports `0x11`, below the floor of several opcodes here, so
+this is not hypothetical. A device that has reported no version is allowed
+through — not knowing is not the same as knowing it is too old.
+
+`0x08` MX_ROUTE is decoded but no MatrixOS build transmits it:
+`mxr_bay_broadcast_routes()` has a declaration and a definition and no callers.
+The decoder still has to be right for third-party controllers, but do not
+expect one on a live mesh, and do not treat its absence as a bug.
+
 ## Working on the protocol
 
 **`PACKED` is the exception in this protocol, not the rule.**
