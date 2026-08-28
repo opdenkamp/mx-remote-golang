@@ -531,3 +531,29 @@ func TestAmpSettingsWithZeroTargetUseTheSender(t *testing.T) {
 		t.Fatalf("settings = %+v", s)
 	}
 }
+
+// A tone byte outside the amp's HTTP bounds still decodes: the mesh receive
+// path copies these through without a range check, so the wire can carry any
+// value and this library reports what arrived rather than what one device's
+// API would have accepted.
+func TestAmpToneOutsideHTTPBoundsIsNotClamped(t *testing.T) {
+	r := newTestRemote(Callbacks{})
+	sender := uidN(144)
+	feed := feeder(r, sender)
+	feed(opSysHello, helloPayload(0x28, "ProAmp8", "AMP0005", "4.8.0", FeatureAudioAmplifier))
+	feed(opSysBayConfig, bayConfigRec(1, 1, 0, "Zone 1", "Hall", 0, BayAudioAmpOut))
+
+	p := make([]byte, ampZoneSettingsSize)
+	binary.LittleEndian.PutUint16(p[16:18], 1)
+	p[32] = AmpToneHTTPMax + 12 // above what the HTTP API allows
+	p[33] = AmpToneHTTPMin - 12 // below it
+	feed(opAmpZoneSettings, p)
+
+	s := r.GetByUID(sender).GetByPortnum(1).AmpSettings()
+	if s == nil {
+		t.Fatal("no amp settings")
+	}
+	if s.Bass != AmpToneHTTPMax+12 || s.Treble != AmpToneHTTPMin-12 {
+		t.Fatalf("tone = %d/%d, want them reported unclamped", s.Bass, s.Treble)
+	}
+}

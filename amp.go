@@ -31,21 +31,34 @@ const (
 	// ampZoneSettingsSize is sizeof(mxr_amp_zone_settings) on the wire.
 	ampZoneSettingsSize = 56
 
-	// AmpToneFlat is the neutral value for Bass, Treble and the EQ bands. They
+	// AmpToneFlat is the neutral value for Bass, Treble and the EQ bands, which
 	// are raw unsigned bytes despite the firmware header describing a signed
-	// range; the device itself accepts only AmpToneMin..AmpToneMax.
+	// range.
 	AmpToneFlat = 128
-	AmpToneMin  = 104
-	AmpToneMax  = 140
+
+	// AmpToneHTTPMin and AmpToneHTTPMax are the bounds the amp's own HTTP API
+	// enforces. Nothing enforces them here: the mesh receive path copies these
+	// bytes straight through without a range check, so a peer can put any value
+	// on the wire and the amp will take it. This library reports what arrived.
+	// Clamping to these is imposing one device's HTTP policy on a mesh peer -
+	// reasonable, but a caller's decision to make knowingly.
+	AmpToneHTTPMin = 104
+	AmpToneHTTPMax = 140
 )
 
-// ampZoneTarget resolves the device an amp-settings frame applies to: the
-// payload UID, or the sender when that UID is zero.
+// ampZoneTarget resolves the device an amp-settings frame concerns: the payload
+// UID, or the sender when that UID is zero.
 //
-// An amp never fills the target in: its transmit path leaves the field on the
-// zeroed payload and identifies itself through the frame header instead. So the
-// fallback is the normal path for device-originated frames, and the payload UID
-// is only set when a controller addresses a specific unit.
+// The two cases are different kinds of frame, not two spellings of one. An amp
+// receiving 0x3D acts only when the payload target is its own uid, and it
+// leaves that field zeroed when transmitting - so a zero-target frame is one no
+// amp will ever accept, which makes it a status notification by construction
+// and the header uid the only way to attribute it. A frame with the target set
+// is a controller addressing one unit, and is a command rather than state.
+//
+// Both are cached here, since nothing in this library acts on a received frame
+// and the mesh path applies commands unvalidated, so an addressed command is
+// what that unit will end up holding.
 func (r *Remote) ampZoneTarget(f *frame) *Device {
 	uid := mustUUID(f, 0)
 	if uid.Empty() {
@@ -62,7 +75,8 @@ func handleAmpZoneSettings(r *Remote, f *frame) {
 	p := f.payload()
 	// The transmitter allocates sizeof(mxr_amp_zone_settings) and writes through
 	// a struct pointer, so the wire image is the compiler's layout including its
-	// padding and 2-byte tail: 56 bytes, not the 54 the fields occupy.
+	// padding and 2-byte tail: 56 bytes, not the 54 the fields occupy. The amp's
+	// own receive path rejects anything shorter with the same constant.
 	if len(p) < ampZoneSettingsSize {
 		return
 	}

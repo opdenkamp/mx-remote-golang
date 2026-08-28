@@ -529,8 +529,9 @@ type NetworkPortStatus struct {
 //
 // Bass, Treble and the EQ bands are raw unsigned bytes with AmpToneFlat as
 // neutral, not signed values - the firmware header's "-104 to 152" is wrong at
-// both ends, and the device accepts only AmpToneMin..AmpToneMax. Gains are
-// int16 inside the amp but a byte on the mesh, so a frame cannot carry the
+// both ends. AmpToneHTTPMin and AmpToneHTTPMax bound what the amp's HTTP API
+// accepts; the mesh path validates nothing, so any byte can arrive here. Gains
+// are int16 inside the amp but a byte on the mesh, so a frame cannot carry the
 // amp's full internal range.
 type AmpZoneSettings struct {
 	GainLeft     int
