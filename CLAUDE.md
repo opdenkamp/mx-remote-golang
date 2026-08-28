@@ -118,6 +118,23 @@ holds its EDID profile as an `int` and returns `EdidProfile` only from the
 accessor), which is what makes an unrecognised value survive to the caller.
 Keep it that way round.
 
+**Where the compiler can only get you halfway, assert the rest against the
+source.** `transmit` requires a target, so omitting the decision will not build
+— but passing `nil` for a frame that does have a recipient compiles and skips
+the gate, and nothing at the type level tells "no recipient" from "recipient I
+did not name". `TestEveryTargetedSendPassesItsTarget` reads the package source
+and checks each send, with the broadcast opcodes named explicitly. It also fails
+if its own pattern stops matching, since a regex that matches nothing reports
+every file clean.
+
+**Fixtures fail by being too simple to reach the thing under test.** Zero
+padding hides a wrong field width; a bare bay fails a method's preconditions
+before it can reach the send being tested; a one-sided assertion passes for a
+guard that always fires. In each case the test is green because it never
+arrives at the code it names, and simplicity is exactly what makes such a
+fixture look trustworthy. Build the fixture that reaches the thing, then check
+it still fails when the thing is broken.
+
 **A tool that perturbs code and reports on the result must assert that its
 perturbation landed.** Every such tool used here has lied at least once by
 silently not applying: a regex that matched a type name instead of an offset, a
