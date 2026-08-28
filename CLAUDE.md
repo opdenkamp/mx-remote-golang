@@ -135,6 +135,13 @@ checks here find three different things, and each is silent about the others:
 | `poisoned()` fixtures | fields read at the wrong width | fields no test reaches |
 | `go test -cover` on handlers | opcodes nothing runs at all | anything a test runs but never asserts |
 
+A fixture hides a shift whenever the neighbouring bytes carry the same value:
+adjacent fields set to the same number, a short NUL-terminated string in a wider
+field, or a port whose high byte is zero. Give every field in a fixture a
+distinct value, and assert that the bays a frame did *not* address were left
+alone - two decode bugs here (`0x39`'s port and `0x08`'s source bays) survived
+because the assertion passed on state an earlier frame had set.
+
 A handler with no test reports clean from the first two for the same reason an
 empty file does. Every productive finding here came from asking what a tool was
 silent about, not from reading its output more carefully.

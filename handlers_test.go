@@ -21,9 +21,10 @@ func bayStateRemote(t *testing.T, n byte, cb Callbacks) (*Remote, DeviceUID, fun
 	sender := uidN(n)
 	feed := feeder(r, sender)
 	feed(opSysHello, helloPayload(0x28, "FF88", "HD0001", "4.8.0", FeatureVideoRouting))
-	feed(opSysBayConfig, append(
-		bayConfigRec(1, 0, 0, "Input 1", "Apple TV", 0, BayHDMIIn),
-		bayConfigRec(2, 1, 0, "Output 1", "TV", 0, BayHDMIOut|BayAudioAmpOut)...))
+	cfg := append(bayConfigRec(1, 0, 0, "Input 1", "Apple TV", 0, BayHDMIIn),
+		bayConfigRec(2, 1, 0, "Output 1", "TV", 0, BayHDMIOut|BayAudioAmpOut)...)
+	cfg = append(cfg, bayConfigRec(3, 0, 1, "Input 2", "Blu-ray", 0, BayHDMIIn)...)
+	feed(opSysBayConfig, cfg)
 	return r, sender, feed
 }
 
@@ -39,16 +40,24 @@ func TestBayTargetedHandlers(t *testing.T) {
 	dev := r.GetByUID(sender)
 	in, out := dev.GetByPortnum(1), dev.GetByPortnum(2)
 
-	// 0x04 DEV_CONNECT: an input reports signal, an output reports HPD
-	feed(opDevConnect, []byte{1, 1})
-	if !in.SignalDetected() {
-		t.Fatal("connect status did not set signal detected on an input")
+	// 0x04 DEV_CONNECT: an input reports signal, an output reports HPD.
+	// Port and flag differ, and the other bay is asserted untouched, so reading
+	// the port one byte over lands on the wrong bay rather than the same value.
+	feed(opDevConnect, []byte{2, 1})
+	if !out.HPDDetected() {
+		t.Fatal("connect status did not set hpd on an output")
+	}
+	if in.SignalDetected() {
+		t.Fatal("connect status for port 2 reached port 1")
 	}
 
 	// 0x05 DEV_POWER_CHANGE
 	feed(opDevPowerChange, []byte{2, 1})
 	if out.PowerStatusValue() != PowerOn {
 		t.Fatalf("power = %v, want on", out.PowerStatusValue())
+	}
+	if in.PowerStatusValue() == PowerOn {
+		t.Fatal("power change for port 2 reached port 1")
 	}
 
 	// 0x27 BAY_HIDE, addressed by uid then a u16 port
@@ -87,14 +96,24 @@ func TestBayTargetedHandlers(t *testing.T) {
 		t.Fatalf("clip = %+v", clip)
 	}
 
-	// 0x39 BAY_STATUS
+	// 0x39 BAY_STATUS: mxr_bay_status is a u16 port, then mxr_cfg_signal, which
+	// is a 14-byte description followed by a 2-byte signal type. The type bytes
+	// are non-zero here so a description read past 14 picks them up.
 	st := make([]byte, 28)
-	st[0] = 1
+	binary.LittleEndian.PutUint16(st[0:2], 1)
+	copy(st[2:16], "1080p60 444 8b") // exactly 14: no terminator inside the field
+	st[16], st[17] = 0x13, 0x20      // signal type, not part of the description
 	binary.LittleEndian.PutUint32(st[20:24], uint32(BayStatusSignalDetected))
 	binary.LittleEndian.PutUint32(st[24:28], uint32(BayHDMIIn))
 	feed(opBayStatus, st)
 	if !in.SignalDetected() {
 		t.Fatal("bay status should report signal detected")
+	}
+	if in.Features() != BayHDMIIn {
+		t.Fatalf("bay features = %v, want %v", in.Features(), BayHDMIIn)
+	}
+	if got := in.SignalType(); got != "1080p60 444 8b" {
+		t.Fatalf("signal description = %q, want %q", got, "1080p60 444 8b")
 	}
 }
 
@@ -102,10 +121,21 @@ func TestRoutingAndDeviceHandlers(t *testing.T) {
 	r, sender, feed := bayStateRemote(t, 111, Callbacks{})
 	dev := r.GetByUID(sender)
 
-	// 0x08 MX_ROUTE: sink port, then video and audio sources two bytes apart
-	feed(opMxRoute, []byte{2, 0, 1, 0, 1, 0})
-	if v := dev.GetByPortnum(2).VideoSource(); v == nil || v.Port() != 1 {
-		t.Fatalf("video source = %v", v)
+	// 0x08 MX_ROUTE, packed with u16 ports: sink@0, selected@2, video@4,
+	// scrambled@6, audio@7. selected is deliberately a different bay from
+	// video, so decoding it as the video source is visible.
+	rt := make([]byte, 9)
+	binary.LittleEndian.PutUint16(rt[0:2], 2) // sink
+	binary.LittleEndian.PutUint16(rt[2:4], 2) // selected: not the shown input
+	binary.LittleEndian.PutUint16(rt[4:6], 1) // video
+	binary.LittleEndian.PutUint16(rt[7:9], 3) // audio: a different bay again
+	feed(opMxRoute, rt)
+	sink := dev.GetByPortnum(2)
+	if v := sink.VideoSource(); v == nil || v.Port() != 1 {
+		t.Fatalf("video source = %v, want port 1", v)
+	}
+	if a := sink.AudioSource(); a == nil || a.Port() != 3 {
+		t.Fatalf("audio source = %v, want port 3", a)
 	}
 
 	// 0x15 SYS_TEMPERATURE: a count then that many readings

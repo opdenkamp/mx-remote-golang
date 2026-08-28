@@ -157,7 +157,12 @@ func handleRoutingChange(r *Remote, f *frame) {
 	if dev == nil {
 		return
 	}
-	sinkPort, ok := f.u8(0)
+	// mxr_routing_change is packed with mbay_port_id ports, so every bay is a
+	// u16: sink at 0, selected at 2, video at 4, scrambled at 6, audio at 7.
+	// Reading them a byte wide put "selected" in video and "video" in audio,
+	// which agrees with the wire only while the selected input is the one
+	// actually being shown.
+	sinkPort, ok := f.u16(0)
 	if !ok {
 		return
 	}
@@ -166,10 +171,10 @@ func handleRoutingChange(r *Remote, f *frame) {
 		return
 	}
 	var video, audio *Bay
-	if v, ok := f.u8(2); ok {
+	if v, ok := f.u16(4); ok {
 		video = dev.getByPortnumLocked(int(v))
 	}
-	if a, ok := f.u8(4); ok {
+	if a, ok := f.u16(7); ok {
 		audio = dev.getByPortnumLocked(int(a))
 	}
 	sink.applySelected(video, audio)
@@ -405,7 +410,9 @@ func handleBayStatus(r *Remote, f *frame) {
 	if dev == nil {
 		return
 	}
-	port, ok := f.u8(1)
+	// mxr_bay_status.local_bay is an mbay_port_id, so a u16 at 0 - reading its
+	// high byte at 1 yields 0 for every real port and never finds a bay
+	port, ok := f.u16(0)
 	if !ok {
 		return
 	}
@@ -420,7 +427,9 @@ func handleBayStatus(r *Remote, f *frame) {
 		status := BayStatusMask(st)
 		bay.applyBayStatus(status)
 		if !status.Has(BayStatusSignalDetected) || !dev.isV2IP() {
-			desc, _ := f.str(2, 16)
+			// mxr_cfg_signal is signal_desc[14] then a 2-byte signal type, so
+			// the description stops at 14 rather than running into the type
+			desc, _ := f.str(2, 14)
 			bay.applySignalStatus(status.Has(BayStatusSignalDetected), &desc)
 		}
 	}
