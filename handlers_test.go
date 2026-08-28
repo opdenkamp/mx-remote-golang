@@ -605,3 +605,85 @@ func TestSendRefusedBelowOpcodeFloor(t *testing.T) {
 		t.Fatalf("a 0x28 device should not be refused: %v", err)
 	}
 }
+
+// Every guarded send, not a sample of them. The guard runs before each method's
+// own preconditions, so one device exercises all of them regardless of bay
+// type - and a guard that no test calls is a guard that can be deleted without
+// anything going red.
+//
+// The device reports 0x01, which is below the floor of every opcode here except
+// SYS_REBOOT. A device at 0x11 would leave most of these guards untested, since
+// their floors are at or below it.
+func TestEveryGuardedSendChecksTheProtocolFloor(t *testing.T) {
+	r := newTestRemote(Callbacks{})
+	old := uidN(160)
+	feed := feeder(r, old)
+	feed(opSysHello, helloPayload(0x01, "OldUnit", "OLD0001", "1.0.0",
+		FeatureV2IPSink|FeatureMultiviewer|FeatureAudioAmplifier|FeatureVideoRouting))
+	feed(opSysBayConfig, append(
+		bayConfigRec(1, 0, 0, "Input 1", "Apple TV", 0, BayHDMIIn),
+		bayConfigRec(2, 1, 0, "Output 1", "TV", 0, BayHDMIOut|BayAudioAmpOut)...))
+
+	dev := r.GetByUID(old)
+	in, out := dev.GetByPortnum(1), dev.GetByPortnum(2)
+	if in == nil || out == nil {
+		t.Fatal("test bays missing")
+	}
+	mv := dev.Multiviewer()
+	if mv == nil {
+		t.Fatal("device did not present a multiviewer, so that guard would go untested")
+	}
+
+	refused := []struct {
+		name string
+		call func() error
+	}{
+		{"SelectVideoSource", func() error { return out.SelectVideoSource(1) }},
+		{"SelectAudioSource", func() error { return out.SelectAudioSource(1) }},
+		{"SelectAudioSourceAddr", func() error { return out.SelectAudioSourceAddr("239.1.1.1", 0, nil) }},
+		{"SetName", func() error { return out.SetName("Kitchen") }},
+		{"SetHidden", func() error { return out.SetHidden(true) }},
+		{"SelectEdidProfile", func() error { return in.SelectEdidProfile(Edid4K) }},
+		{"TxAction", func() error { return out.TxAction(ActionPowerOn) }},
+		{"VolumeSet", func() error { return out.VolumeSet(40, nil) }},
+		{"SetZoneSettings", func() error { return out.SetZoneSettings(AmpZoneSettings{}) }},
+		{"ReadStats", func() error { return dev.ReadStats(true) }},
+		{"AudioMute", func() error { return dev.AudioMute(1, true) }},
+		{"Multiviewer.SetViewMode", func() error { return mv.SetViewMode(MVViewPIP) }},
+	}
+	for _, c := range refused {
+		if err := c.call(); !errors.Is(err, ErrProtocolTooOld) {
+			t.Errorf("%s: got %v, want ErrProtocolTooOld", c.name, err)
+		}
+	}
+	// SYS_REBOOT floors at 0x01, so even this device must not be refused it.
+	//
+	// Its guard is therefore unreachable: nothing can report below 0x01, and a
+	// device reporting nothing is let through deliberately. Deleting that one
+	// guard breaks no test, and that is correct rather than a coverage gap -
+	// what is pinned here is that Reboot stays allowed. The guard is kept
+	// because it reads the floor from the table, so it starts working on its
+	// own if SYS_REBOOT ever gains one.
+	if err := dev.Reboot(); errors.Is(err, ErrProtocolTooOld) {
+		t.Errorf("Reboot: refused, but its opcode floors at 0x01")
+	}
+}
+
+// The comparison is >=, so a device sitting exactly on an opcode's floor is
+// allowed while the next opcode up is not.
+func TestProtocolFloorBoundary(t *testing.T) {
+	r := newTestRemote(Callbacks{})
+	uid := uidN(161)
+	feed := feeder(r, uid)
+	// 0x11 is exactly AUDIO_SET_VOLUME's floor and below V2IP_STATS' 0x13
+	feed(opSysHello, helloPayload(0x11, "Edge", "EDGE001", "4.1.1", FeatureAudioAmplifier|FeatureVideoRouting))
+	feed(opSysBayConfig, bayConfigRec(2, 1, 0, "Output 1", "TV", 0, BayHDMIOut|BayAudioAmpOut))
+
+	dev := r.GetByUID(uid)
+	if err := dev.GetByPortnum(2).VolumeSet(40, nil); errors.Is(err, ErrProtocolTooOld) {
+		t.Errorf("volume set at exactly its floor should be allowed: %v", err)
+	}
+	if err := dev.ReadStats(true); !errors.Is(err, ErrProtocolTooOld) {
+		t.Errorf("stats one above the device's version = %v, want ErrProtocolTooOld", err)
+	}
+}
