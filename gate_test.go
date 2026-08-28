@@ -21,7 +21,15 @@ var broadcastOpcodes = map[string]bool{
 	"opSysMonitoringPulse": true,
 }
 
-var transmitCall = regexp.MustCompile(`r\.transmit\(\s*([A-Za-z_][\w.]*)\s*,\s*buildFrame\(\s*\w+\s*,\s*(op\w+)`)
+// Every send, however written, and then the readable form of one. Splitting
+// them is the point: a site the detailed pattern cannot read must fail loudly
+// rather than be skipped, or a send in an unexpected form goes unchecked while
+// the scan stays green. A minimum count catches the pattern failing wholesale;
+// it does not catch one site dropping out of it.
+var (
+	anyTransmit  = regexp.MustCompile(`r\.transmit\(`)
+	transmitCall = regexp.MustCompile(`r\.transmit\(\s*([A-Za-z_][\w.]*)\s*,\s*buildFrame\(\s*\w+\s*,\s*(op\w+)`)
+)
 
 // TestEveryTargetedSendPassesItsTarget closes the gap the compiler cannot.
 //
@@ -44,7 +52,21 @@ func TestEveryTargetedSendPassesItsTarget(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, m := range transmitCall.FindAllStringSubmatch(string(src), -1) {
+		text := string(src)
+		// every site the loose pattern finds must also be readable by the
+		// detailed one; anything else is reported, not skipped
+		readable := map[int]bool{}
+		for _, loc := range transmitCall.FindAllStringIndex(text, -1) {
+			readable[loc[0]] = true
+		}
+		for _, loc := range anyTransmit.FindAllStringIndex(text, -1) {
+			if !readable[loc[0]] {
+				t.Errorf("%s:%d: a send here could not be read for its target and opcode, "+
+					"so it is unchecked; rewrite it in the usual form or widen the pattern deliberately",
+					f, strings.Count(text[:loc[0]], "\n")+1)
+			}
+		}
+		for _, m := range transmitCall.FindAllStringSubmatch(text, -1) {
 			target, opcode := m[1], m[2]
 			seen++
 			if target == "nil" && !broadcastOpcodes[opcode] {
