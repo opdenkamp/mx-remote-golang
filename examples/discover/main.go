@@ -13,7 +13,7 @@ import (
 	"os/signal"
 	"time"
 
-	mxremote "github.com/opdenkamp/mx-remote-golang"
+	mxremote "github.com/opdenkamp/mx-remote-golang/v2"
 )
 
 func main() {

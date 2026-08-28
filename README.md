@@ -35,8 +35,22 @@ All devices below run MatrixOS and are controlled through the same protocol:
 ## Installation
 
 ```
-import mxremote "github.com/opdenkamp/mx-remote-golang"
+import mxremote "github.com/opdenkamp/mx-remote-golang/v2"
 ```
+
+### Upgrading from v1
+
+Two fields changed type, both on the V2IP device configuration. Everything else
+is additive, so a v1 consumer that does not touch these needs only the import
+path change.
+
+- `DeviceV2IPDetails.TxRate` is now `*uint8` rather than `uint8`. It is `nil`
+  when the sender offered no rate, which a device does on every write that is
+  not a rate change — previously that arrived as a real-looking `0`.
+- `V2IPScalingSettings.Mode` is now `MxrSignalType` rather than `uint16`, which
+  decodes the svd, colour space and bit depth packed into it. Comparisons with
+  untyped constants still compile; assigning it to a `uint16` needs a
+  conversion.
 
 ## Quick start
 

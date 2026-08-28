@@ -9,9 +9,11 @@ units, ProAmp8 amplifiers) over UDP multicast/broadcast: discovery, A/V routing,
 volume, remote-control passthrough, V2IP streaming, multiviewer, audio
 endpoints, amplifier settings, and diagnostics.
 
-- Module: `github.com/opdenkamp/mx-remote-golang`; package `mxremote`. The import
-  path basename differs from the package name, so import it aliased:
-  `import mxremote "github.com/opdenkamp/mx-remote-golang"`.
+- Module: `github.com/opdenkamp/mx-remote-golang/v2`; package `mxremote`. The
+  import path basename differs from the package name, so import it aliased:
+  `import mxremote "github.com/opdenkamp/mx-remote-golang/v2"`. The `/v2` suffix
+  is required by Go modules at major version 2 and above; without it a `go get
+  -u` from a v1 consumer would silently pull breaking changes.
 - Single flat package (no subpackages). Public API is exported; all wire/frame
   machinery is unexported.
 - The reference implementation is the Python library at `../mx-remote`. The Go
