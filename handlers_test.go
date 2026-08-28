@@ -634,26 +634,36 @@ func TestEveryGuardedSendChecksTheProtocolFloor(t *testing.T) {
 		t.Fatal("device did not present a multiviewer, so that guard would go untested")
 	}
 
-	refused := []struct {
+	// The same table is run against a current device below. Asserting only the
+	// refusal direction would pass for a guard hardcoded to always refuse, or
+	// for a command failing for some unrelated reason; the pair is what makes
+	// the refusal mean "because of the protocol floor".
+	table := func(dev *Device, in, out *Bay, mv *Multiviewer) []struct {
 		name string
 		call func() error
-	}{
-		{"SelectVideoSource", func() error { return out.SelectVideoSource(1) }},
-		{"SelectAudioSource", func() error { return out.SelectAudioSource(1) }},
-		{"SelectAudioSourceAddr", func() error { return out.SelectAudioSourceAddr("239.1.1.1", 0, nil) }},
-		{"SetName", func() error { return out.SetName("Kitchen") }},
-		{"SetHidden", func() error { return out.SetHidden(true) }},
-		{"SelectEdidProfile", func() error { return in.SelectEdidProfile(Edid4K) }},
-		{"TxAction", func() error { return out.TxAction(ActionPowerOn) }},
-		{"VolumeSet", func() error { return out.VolumeSet(40, nil) }},
-		{"SetZoneSettings", func() error { return out.SetZoneSettings(AmpZoneSettings{}) }},
-		{"ReadStats", func() error { return dev.ReadStats(true) }},
-		{"AudioMute", func() error { return dev.AudioMute(1, true) }},
-		{"Multiviewer.SetViewMode", func() error { return mv.SetViewMode(MVViewPIP) }},
+	} {
+		return []struct {
+			name string
+			call func() error
+		}{
+			{"SelectVideoSource", func() error { return out.SelectVideoSource(1) }},
+			{"SelectAudioSource", func() error { return out.SelectAudioSource(1) }},
+			{"SelectAudioSourceAddr", func() error { return out.SelectAudioSourceAddr("239.1.1.1", 0, nil) }},
+			{"SetName", func() error { return out.SetName("Kitchen") }},
+			{"SetHidden", func() error { return out.SetHidden(true) }},
+			{"SelectEdidProfile", func() error { return in.SelectEdidProfile(Edid4K) }},
+			{"TxAction", func() error { return out.TxAction(ActionPowerOn) }},
+			{"VolumeSet", func() error { return out.VolumeSet(40, nil) }},
+			{"SetZoneSettings", func() error { return out.SetZoneSettings(AmpZoneSettings{}) }},
+			{"ReadStats", func() error { return dev.ReadStats(true) }},
+			{"AudioMute", func() error { return dev.AudioMute(1, true) }},
+			{"Multiviewer.SetViewMode", func() error { return mv.SetViewMode(MVViewPIP) }},
+		}
 	}
-	for _, c := range refused {
+
+	for _, c := range table(dev, in, out, mv) {
 		if err := c.call(); !errors.Is(err, ErrProtocolTooOld) {
-			t.Errorf("%s: got %v, want ErrProtocolTooOld", c.name, err)
+			t.Errorf("0x01 device, %s: got %v, want ErrProtocolTooOld", c.name, err)
 		}
 	}
 	// SYS_REBOOT floors at 0x01, so even this device must not be refused it.
@@ -666,6 +676,26 @@ func TestEveryGuardedSendChecksTheProtocolFloor(t *testing.T) {
 	// own if SYS_REBOOT ever gains one.
 	if err := dev.Reboot(); errors.Is(err, ErrProtocolTooOld) {
 		t.Errorf("Reboot: refused, but its opcode floors at 0x01")
+	}
+
+	// The other direction: a current device is refused none of them. Without
+	// this, a guard that always refused would look correct above.
+	cur := uidN(162)
+	cf := feeder(r, cur)
+	cf(opSysHello, helloPayload(0x28, "NewUnit", "NEW0001", "4.8.0",
+		FeatureV2IPSink|FeatureMultiviewer|FeatureAudioAmplifier|FeatureVideoRouting))
+	cf(opSysBayConfig, append(
+		bayConfigRec(1, 0, 0, "Input 1", "Apple TV", 0, BayHDMIIn),
+		bayConfigRec(2, 1, 0, "Output 1", "TV", 0, BayHDMIOut|BayAudioAmpOut)...))
+	newDev := r.GetByUID(cur)
+	newMV := newDev.Multiviewer()
+	if newMV == nil {
+		t.Fatal("current device did not present a multiviewer")
+	}
+	for _, c := range table(newDev, newDev.GetByPortnum(1), newDev.GetByPortnum(2), newMV) {
+		if err := c.call(); errors.Is(err, ErrProtocolTooOld) {
+			t.Errorf("0x28 device, %s: refused, but it is above every floor here", c.name)
+		}
 	}
 }
 

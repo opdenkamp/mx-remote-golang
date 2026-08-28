@@ -150,6 +150,16 @@ checks here find three different things, and each is silent about the others:
 | `poisoned()` fixtures | fields read at the wrong width | fields no test reaches |
 | `go test -cover` on handlers | opcodes nothing runs at all | anything a test runs but never asserts |
 
+**Assert both directions of a guard, and pick an input that can actually trip
+it.** A test that only checks the refusal passes for a guard hardcoded to
+refuse, and for a call failing for some unrelated reason — the paired "and this
+one is allowed" is what makes the refusal mean what it says. Choosing the input
+matters as much: the protocol-floor test first used a device reporting `0x11`,
+which sits at or above most of these opcodes' floors, so eight guards correctly
+allowed the send and the test was asserting a refusal that should never have
+happened. An input that cannot trip the thing under test looks exactly like
+coverage.
+
 A fixture hides a shift whenever the neighbouring bytes carry the same value:
 adjacent fields set to the same number, a short NUL-terminated string in a wider
 field, or a port whose high byte is zero. Give every field in a fixture a
