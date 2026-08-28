@@ -6,6 +6,7 @@ package mxremote
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -390,4 +391,54 @@ func TestProbeLoopAnnouncesHello(t *testing.T) {
 	}
 	cancel()
 	r.wg.Wait()
+}
+
+// The fourth question, after "does the pattern still match", "does every match
+// get read" and "does every site get matched": is the thing being guarded still
+// the only way through?
+//
+// Every argument for the protocol gate rests on two structural claims — one
+// function builds every frame, and one function sends every frame. Neither is
+// enforced by anything. A second frame builder, or a second call to the
+// socket, would bypass the gate entirely, and the scan above would not notice
+// because it only inspects the sends it can already see.
+func TestTheChokePointsAreStillChokePoints(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// no subpackage can hide one: this is a single flat package by design, and
+	// examples/ is a separate module path that cannot reach unexported sends
+	if dirs, _ := filepath.Glob("*/"); len(dirs) > 1 {
+		t.Errorf("more than one subdirectory (%v); this scan only reads the package root", dirs)
+	}
+
+	var buildSites, sendSites []string
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, line := range strings.Split(string(src), "\n") {
+			// writing the magic byte is what makes a frame a frame
+			if strings.Contains(line, "= magic0") && !strings.Contains(line, "magic0 ") {
+				buildSites = append(buildSites, fmt.Sprintf("%s:%d", f, i+1))
+			}
+			// the conn-level write is the last point before the wire
+			if strings.Contains(line, ".pc.WriteToUDP(") {
+				sendSites = append(sendSites, fmt.Sprintf("%s:%d", f, i+1))
+			}
+		}
+	}
+	if len(buildSites) != 1 {
+		t.Errorf("frames are built in %d places (%v); the gate assumes exactly one, "+
+			"and a second builder is not reached by the send scan", len(buildSites), buildSites)
+	}
+	if len(sendSites) != 1 {
+		t.Errorf("the socket is written from %d places (%v); the gate assumes exactly one, "+
+			"and a second write bypasses it entirely", len(sendSites), sendSites)
+	}
 }

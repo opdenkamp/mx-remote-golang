@@ -143,6 +143,21 @@ arrives at the code it names, and simplicity is exactly what makes such a
 fixture look trustworthy. Build the fixture that reaches the thing, then check
 it still fails when the thing is broken.
 
+**A scan has four separate questions, and fixing one does not answer the
+others.** Each of these was a real hole here, found only when someone named it:
+
+1. *Does the pattern still match?* — assert a minimum number of sites, or a
+   rename leaves it matching nothing and reporting every file clean.
+2. *Does every match get read?* — a site the detailed pattern cannot parse must
+   fail with its location, never be skipped.
+3. *Does every site get matched?* — find sites with a loose pattern too, and
+   require each to be readable by the detailed one.
+4. *Is the guarded thing still the only way through?* — the send scan assumes
+   one function builds every frame and one writes every socket. Neither is
+   enforced by the language, so `TestTheChokePointsAreStillChokePoints` counts
+   them. A second builder or a second write bypasses the gate, and the send
+   scan cannot see it, because it only inspects sends it already recognises.
+
 **A tool that perturbs code and reports on the result must assert that its
 perturbation landed.** Every such tool used here has lied at least once by
 silently not applying: a regex that matched a type name instead of an offset, a
