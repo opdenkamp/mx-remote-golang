@@ -206,3 +206,36 @@ func TestControlMethodReachesTheSocket(t *testing.T) {
 		t.Fatalf("name on the wire = %q, want %q", name, "Kitchen")
 	}
 }
+
+// The other direction of the re-arm: a send that succeeds must consume the
+// interval, or the probe loop would announce on every tick. Needs a real
+// socket, since the failure path is what a Remote without one exercises.
+func TestHelloReArmsOnlyAfterASuccessfulSend(t *testing.T) {
+	const group, port = "239.255.77.97", 18814
+
+	c, err := newConn(group, port, "", "")
+	if err != nil {
+		t.Skipf("no usable multicast interface: %v", err)
+	}
+	defer c.close()
+
+	r := newTestRemote(Callbacks{})
+	r.uid = uidN(220)
+	r.mu.Lock()
+	r.conn = c
+	r.lastHello = time.Time{}
+	r.helloInterval = 0
+	r.mu.Unlock()
+
+	r.txHello()
+
+	r.mu.Lock()
+	interval, last := r.helloInterval, r.lastHello
+	r.mu.Unlock()
+	if last.IsZero() {
+		t.Fatal("a successful send did not record the announcement")
+	}
+	if interval < helloBaseInterval || interval > helloBaseInterval+helloJitterInterval {
+		t.Fatalf("interval after a successful send = %v, want it re-drawn in range", interval)
+	}
+}

@@ -345,16 +345,21 @@ func TestHelloIntervalIsJittered(t *testing.T) {
 		t.Fatalf("only %d distinct intervals in 200 draws; the jitter is not varying", len(seen))
 	}
 
-	// and a send re-draws it rather than leaving the first value forever
+	// A send that fails must not consume the interval: the firmware re-arms
+	// only inside the branch where the transmit succeeded, so a failure is
+	// retried on the next tick rather than costing a whole interval of
+	// silence. This Remote has no socket, so the send fails.
 	r.mu.Lock()
+	r.lastHello = time.Time{}
 	r.helloInterval = 0
 	r.mu.Unlock()
 	r.txHello()
 	r.mu.Lock()
-	got := r.helloInterval
+	interval, last := r.helloInterval, r.lastHello
 	r.mu.Unlock()
-	if got < helloBaseInterval {
-		t.Fatalf("interval after a send = %v, want it re-drawn", got)
+	if interval != 0 || !last.IsZero() {
+		t.Fatalf("a failed send re-armed the timer (interval %v, last %v); it should retry next tick",
+			interval, last)
 	}
 }
 

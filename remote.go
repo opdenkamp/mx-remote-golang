@@ -376,6 +376,12 @@ func (r *Remote) txDiscover() {
 // Hello announcement cadence, matching the firmware's own: a 2.5s base plus up
 // to 2.5s of jitter, re-drawn after each send so a mesh full of clients does
 // not fall into step.
+//
+// The probe loop ticks once a second, so the interval actually observed is the
+// draw rounded up to the next tick — effectively 3, 4 or 5 seconds rather than
+// a continuous 2.5 to 5. Coarser than the firmware, and left that way: the
+// jitter exists to stop announcers colliding, and three values across clients
+// whose ticks start at different moments is enough for that.
 const (
 	helloBaseInterval   = 2500 * time.Millisecond
 	helloJitterInterval = 2500 * time.Millisecond
@@ -402,8 +408,6 @@ func (r *Remote) helloDueLocked(now time.Time) bool {
 
 func (r *Remote) txHello() {
 	r.mu.Lock()
-	r.lastHello = time.Now()
-	r.helloInterval = nextHelloInterval()
 	uid := r.uid
 	name := r.name
 	r.mu.Unlock()
@@ -415,7 +419,18 @@ func (r *Remote) txHello() {
 	payload = appendFixedStr(payload, Version, 16)
 	feat := uint32(FeatureManager)
 	payload = append(payload, byte(feat), byte(feat>>8), byte(feat>>16), byte(feat>>24))
-	_, _ = r.transmit(nil, buildFrame(uid, opSysHello, protocolFor(opSysHello), payload))
+	// Re-arm only once the frame is actually away, as the firmware does — it
+	// resets hello_timeout inside the branch where mxr_transmit succeeded. A
+	// send that fails is retried on the next tick rather than costing a whole
+	// interval of silence, which matters most at startup and after a network
+	// blip: exactly when being heard is worth the most.
+	if n, err := r.transmit(nil, buildFrame(uid, opSysHello, protocolFor(opSysHello), payload)); err != nil || n <= 0 {
+		return
+	}
+	r.mu.Lock()
+	r.lastHello = time.Now()
+	r.helloInterval = nextHelloInterval()
+	r.mu.Unlock()
 }
 
 func (r *Remote) receiveLoop(c *conn) {
