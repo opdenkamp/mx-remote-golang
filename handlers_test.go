@@ -401,3 +401,89 @@ func TestBayConfigReachesTheBay(t *testing.T) {
 		t.Fatalf("signal mode = %v (svd %d, bpp %d)", m, m.Svd(), m.Bpp())
 	}
 }
+
+// Amp zone settings, laid out from the C declaration. Every field gets a
+// distinct value, and the delays exceed 65535 samples - the range the old
+// offsets could not represent, since they read two padding bytes plus the low
+// half of the real value.
+func TestAmpZoneSettingsDecode(t *testing.T) {
+	var got *AmpZoneSettings
+	r := newTestRemote(Callbacks{
+		OnAmpZoneSettingsChanged: func(_ *Bay, s AmpZoneSettings) { got = &s },
+	})
+	sender := uidN(140)
+	feed := feeder(r, sender)
+	feed(opSysHello, helloPayload(0x28, "ProAmp8", "AMP0001", "4.8.0", FeatureAudioAmplifier))
+	feed(opSysBayConfig, bayConfigRec(4, 1, 0, "Zone 4", "Kitchen", 0, BayAudioAmpOut))
+
+	const (
+		delayL = 96000  // 2s at 48kHz
+		delayR = 144000 // 3s
+	)
+	p := make([]byte, 56)
+	copy(p[0:16], sender[:])
+	binary.LittleEndian.PutUint16(p[16:18], 4) // zone
+	p[18], p[19], p[20], p[21] = 200, 201, 12, 220
+	binary.LittleEndian.PutUint32(p[24:28], delayL)
+	binary.LittleEndian.PutUint32(p[28:32], delayR)
+	p[32], p[33], p[34], p[35], p[36] = 130, 131, 1, 2, 33
+	binary.LittleEndian.PutUint32(p[40:44], 900)
+	copy(p[44:49], []byte{120, 121, 122, 123, 124})
+	copy(p[49:54], []byte{140, 141, 142, 143, 144})
+	feed(opAmpZoneSettings, p)
+
+	s := r.GetByUID(sender).GetByPortnum(4).AmpSettings()
+	if s == nil {
+		t.Fatal("no amp settings")
+	}
+	if got == nil {
+		t.Fatal("callback did not fire")
+	}
+	if s.GainLeft != 200 || s.GainRight != 201 {
+		t.Fatalf("gain = %d/%d, want 200/201", s.GainLeft, s.GainRight)
+	}
+	if s.VolumeMin != 12 || s.VolumeMax != 220 {
+		t.Fatalf("volume range = %d..%d, want 12..220", s.VolumeMin, s.VolumeMax)
+	}
+	if s.DelayLeft != delayL || s.DelayRight != delayR {
+		t.Fatalf("delays = %d/%d, want %d/%d (padding read as part of the value?)",
+			s.DelayLeft, s.DelayRight, delayL, delayR)
+	}
+	if s.Bass != 130 || s.Treble != 131 {
+		t.Fatalf("bass/treble = %d/%d, want 130/131", s.Bass, s.Treble)
+	}
+	if s.Bridged != 1 || s.PowerMode != 2 || s.PowerLevel != 33 {
+		t.Fatalf("bridged/mode/level = %d/%d/%d, want 1/2/33", s.Bridged, s.PowerMode, s.PowerLevel)
+	}
+	if s.PowerTimeout != 900 {
+		t.Fatalf("power timeout = %d, want 900", s.PowerTimeout)
+	}
+	if s.EQLeft != [5]int{120, 121, 122, 123, 124} {
+		t.Fatalf("eq left = %v", s.EQLeft)
+	}
+	if s.EQRight != [5]int{140, 141, 142, 143, 144} {
+		t.Fatalf("eq right = %v", s.EQRight)
+	}
+}
+
+// 0x3E: target uid, then the dolby config byte and a flags byte.
+func TestAmpDolbyDecode(t *testing.T) {
+	r := newTestRemote(Callbacks{})
+	sender := uidN(141)
+	feed := feeder(r, sender)
+	feed(opSysHello, helloPayload(0x28, "ProAmp8", "AMP0002", "4.8.0", FeatureAudioAmplifier))
+
+	p := make([]byte, 24)
+	copy(p[0:16], sender[:])
+	p[16] = 2         // 4-zone dolby mode
+	p[17] = 0x1 | 0x4 // pcm upmix, upmix active; dolby not detected
+	feed(opAmpDolbyState, p)
+
+	d := r.GetByUID(sender).DolbySettings()
+	if d == nil {
+		t.Fatal("no dolby settings")
+	}
+	if d.Mode != 2 || !d.PCMUpmix || d.DolbyDetected || !d.PCMUpmixActive {
+		t.Fatalf("dolby = %+v", d)
+	}
+}

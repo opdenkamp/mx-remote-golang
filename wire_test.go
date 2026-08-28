@@ -146,6 +146,10 @@ func TestAudioTxFrames(t *testing.T) {
 	}
 }
 
+// The expected bytes here are laid out from the C declaration field by field,
+// not produced by buildAmpZoneSettings - a vector taken from the builder only
+// proves the builder agrees with itself, which is how the delays sat at the
+// wrong offset in two libraries at once.
 func TestAmpZoneSettingsTxFrame(t *testing.T) {
 	s := AmpZoneSettings{
 		GainLeft: 10, GainRight: 11, VolumeMin: 0, VolumeMax: 100,
@@ -155,7 +159,7 @@ func TestAmpZoneSettingsTxFrame(t *testing.T) {
 		EQRight: [5]int{6, 7, 8, 9, 10},
 	}
 	got := hexOf(buildFrame(testUID, opAmpZoneSettings, protocolFor(opAmpZoneSettings), buildAmpZoneSettings(testUID, 5, s)))
-	want := "50381c00000102030405060708090a0b0c0d0e0f3d003800000102030405060708090a0b0c0d0e0f05000a0b00640500000006000000000003040102070000002c0100000102030405060708090a0000"
+	want := "50381c00000102030405060708090a0b0c0d0e0f3d003800000102030405060708090a0b0c0d0e0f05000a0b00640000050000000600000003040102070000002c0100000102030405060708090a0000"
 	if got != want {
 		t.Fatalf("ampzone\n got=%s\nwant=%s", got, want)
 	}

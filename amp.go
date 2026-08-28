@@ -54,12 +54,24 @@ func handleAmpZoneSettings(r *Remote, f *frame) {
 		return
 	}
 	s := AmpZoneSettings{
-		GainLeft:     int(p[18]),
-		GainRight:    int(p[19]),
-		VolumeMin:    int(p[20]),
-		VolumeMax:    int(p[21]),
-		DelayLeft:    binary.LittleEndian.Uint32(p[22:26]),
-		DelayRight:   binary.LittleEndian.Uint32(p[26:30]),
+		GainLeft:  int(p[18]),
+		GainRight: int(p[19]),
+		VolumeMin: int(p[20]),
+		VolumeMax: int(p[21]),
+		// mxr_amp_zone_settings is ALIGN(8), which is aligned(8) and not packed,
+		// so the u32 delays cannot start at 22 - they pad to 24 and 28. The
+		// rest of this record only decodes correctly with those two padding
+		// bytes ahead of the delays rather than behind them: bass at 32,
+		// power_auto_time at 40 and the eq bands at 44 and 49 all depend on it.
+		//
+		// Derived from the struct rather than measured. Both this library and
+		// the Python reference previously read 22 and 26 and wrote them there
+		// too, so a round trip agreed with itself while disagreeing with the
+		// amp. Awaiting an offsetof assertion or a captured frame; a delay that
+		// reads back as roughly two padding bytes plus half the real value, or
+		// one above 65535 samples wrapping, means revisit this first.
+		DelayLeft:    binary.LittleEndian.Uint32(p[24:28]),
+		DelayRight:   binary.LittleEndian.Uint32(p[28:32]),
 		Bass:         int(p[32]),
 		Treble:       int(p[33]),
 		Bridged:      int(p[34]),
@@ -98,9 +110,9 @@ func buildAmpZoneSettings(deviceUID DeviceUID, port int, s AmpZoneSettings) []by
 	p = append(p, deviceUID[:]...)
 	p = append(p, byte(port), byte(port>>8))
 	p = append(p, byte(s.GainLeft), byte(s.GainRight), byte(s.VolumeMin), byte(s.VolumeMax))
+	p = append(p, 0, 0) // alignment ahead of the u32 delays, not behind them
 	p = appendU32(p, s.DelayLeft)
 	p = appendU32(p, s.DelayRight)
-	p = append(p, 0, 0)
 	p = append(p, byte(s.Bass), byte(s.Treble), byte(s.Bridged), byte(s.PowerMode), byte(s.PowerLevel))
 	p = append(p, 0, 0, 0)
 	p = appendU32(p, s.PowerTimeout)
