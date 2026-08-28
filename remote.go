@@ -68,6 +68,7 @@ type Remote struct {
 	closing         bool
 	wg              sync.WaitGroup
 	lastHello       time.Time
+	helloInterval   time.Duration
 	discoverTimeout time.Time
 }
 
@@ -88,6 +89,7 @@ func New(cfg Config) *Remote {
 		broadcast: cfg.Broadcast,
 	}
 	r.links = newBayLinks(r)
+	r.helloInterval = nextHelloInterval()
 	return r
 }
 
@@ -371,9 +373,37 @@ func (r *Remote) txDiscover() {
 	_, _ = r.transmit(nil, buildFrame(uid, opSysDiscover, protocolFor(opSysDiscover), nil))
 }
 
+// Hello announcement cadence, matching the firmware's own: a 2.5s base plus up
+// to 2.5s of jitter, re-drawn after each send so a mesh full of clients does
+// not fall into step.
+const (
+	helloBaseInterval   = 2500 * time.Millisecond
+	helloJitterInterval = 2500 * time.Millisecond
+)
+
+func nextHelloInterval() time.Duration {
+	var b [2]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return helloBaseInterval + helloJitterInterval/2
+	}
+	jitter := time.Duration(uint16(b[0])<<8|uint16(b[1])) * helloJitterInterval / 65536
+	return helloBaseInterval + jitter
+}
+
+// helloDueLocked reports whether it is time to announce again.
+//
+// This is a timer, not a response to traffic: a device announces itself on a
+// schedule whether or not anything is talking to it, and a client that only
+// re-announced when a datagram arrived would go silent on a quiet network and
+// stay unknown to every peer that started after it.
+func (r *Remote) helloDueLocked(now time.Time) bool {
+	return !r.closing && now.Sub(r.lastHello) >= r.helloInterval
+}
+
 func (r *Remote) txHello() {
 	r.mu.Lock()
 	r.lastHello = time.Now()
+	r.helloInterval = nextHelloInterval()
 	uid := r.uid
 	name := r.name
 	r.mu.Unlock()
@@ -403,15 +433,7 @@ func (r *Remote) receiveLoop(c *conn) {
 }
 
 func (r *Remote) processDatagram(data []byte, addr string) {
-	ts := time.Now()
-	r.processFrame(data, addr, ts)
-
-	r.mu.Lock()
-	resend := !r.closing && time.Since(r.lastHello) >= 30*time.Second
-	r.mu.Unlock()
-	if resend {
-		r.txHello()
-	}
+	r.processFrame(data, addr, time.Now())
 }
 
 func (r *Remote) processFrame(data []byte, addr string, ts time.Time) {
@@ -470,9 +492,13 @@ func (r *Remote) backgroundProbe(ctx context.Context) {
 				}
 			}
 			due := time.Since(r.discoverTimeout) >= 5*time.Second
+			helloDue := r.helloDueLocked(time.Now())
 			pending := r.pending
 			r.pending = nil
 			r.mu.Unlock()
+			if helloDue {
+				r.txHello()
+			}
 			for _, cb := range pending {
 				cb()
 			}

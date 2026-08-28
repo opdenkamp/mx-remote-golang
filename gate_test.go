@@ -4,6 +4,7 @@
 package mxremote
 
 import (
+	"context"
 	"encoding/binary"
 	"os"
 	"path/filepath"
@@ -265,14 +266,11 @@ func TestControlMethodsRoundTrip(t *testing.T) {
 }
 
 // processDatagram is the real receive entry point; every other test here enters
-// one level below it at processFrame, which is where the Python port found the
-// same shape hiding its echo skip.
-//
-// The layer is not empty: it is the only thing that re-announces this client's
-// hello. The background probe sends discover and never hello, so if this stops
-// working the client goes silent to peers that started after it did, and no
-// test below this level would notice.
-func TestProcessDatagramReannouncesHello(t *testing.T) {
+// one level below it at processFrame. Keeping a test at this level matters even
+// though the wrapper is currently thin: it was not always, and the behaviour it
+// used to hold — re-announcing hello — was wrong precisely because it lived
+// here, driven by arriving traffic rather than by a clock.
+func TestProcessDatagramProcessesFrames(t *testing.T) {
 	r := newTestRemote(Callbacks{})
 	r.uid = uidN(200)
 	peer := uidN(201)
@@ -282,45 +280,114 @@ func TestProcessDatagramReannouncesHello(t *testing.T) {
 	r.txTap = func(b []byte) { sent = append(sent, append([]byte(nil), b...)) }
 	r.mu.Unlock()
 
-	helloCount := func() int {
-		n := 0
-		for _, f := range sent {
-			if len(f) >= headerLen && binary.LittleEndian.Uint16(f[20:22]) == opSysHello {
-				n++
-			}
-		}
-		return n
-	}
-
-	datagram := buildFrame(peer, opSysDiscover, protocolFor(opSysDiscover), nil)
-
-	// a recent hello: an arriving datagram must not trigger another
-	r.mu.Lock()
-	r.lastHello = time.Now()
-	r.mu.Unlock()
-	sent = sent[:0]
-	r.processDatagram(datagram, "10.8.8.9")
-	if n := helloCount(); n != 0 {
-		t.Fatalf("re-announced %d times with a fresh hello, want 0", n)
-	}
-
-	// once the hello has aged past its window, the next datagram re-announces
-	r.mu.Lock()
-	r.lastHello = time.Now().Add(-31 * time.Second)
-	r.mu.Unlock()
-	sent = sent[:0]
-	r.processDatagram(datagram, "10.8.8.9")
-	if n := helloCount(); n != 1 {
-		t.Fatalf("re-announced %d times with a stale hello, want 1", n)
-	}
-
-	// and the frame itself is still processed, not swallowed by the re-announce
-	r.mu.Lock()
-	r.lastHello = time.Now()
-	r.mu.Unlock()
 	r.processDatagram(buildFrame(peer, opSysHello, protocolFor(opSysHello),
 		helloPayload(0x28, "Peer", "PR0001", "4.8.0", FeatureVideoRouting)), "10.8.8.9")
 	if r.GetByUID(peer) == nil {
-		t.Fatal("the datagram's own frame was not processed")
+		t.Fatal("the datagram's frame was not processed")
 	}
+	// arriving traffic must not itself trigger an announcement
+	for _, f := range sent {
+		if len(f) >= headerLen && binary.LittleEndian.Uint16(f[20:22]) == opSysHello {
+			t.Fatal("a received datagram triggered a hello; announcement is a timer, not a reply")
+		}
+	}
+}
+
+// A device announces itself on a schedule whether or not anything is talking to
+// it. A client that only re-announced on arriving traffic went silent on a
+// quiet network and stayed unknown to every peer that started after it.
+func TestHelloIsAnnouncedOnATimer(t *testing.T) {
+	r := newTestRemote(Callbacks{})
+	r.uid = uidN(202)
+
+	r.mu.Lock()
+	// as though we had just announced
+	r.lastHello = time.Now()
+	r.helloInterval = 3 * time.Second
+	now := r.lastHello
+	r.mu.Unlock()
+
+	if r.helloDueLocked(now.Add(2 * time.Second)) {
+		t.Fatal("announced early")
+	}
+	// no traffic has arrived, and it is still due once the interval elapses
+	if !r.helloDueLocked(now.Add(3 * time.Second)) {
+		t.Fatal("not due at the interval; a silent network would never announce")
+	}
+	if !r.helloDueLocked(now.Add(time.Hour)) {
+		t.Fatal("not due long after the interval")
+	}
+
+	r.mu.Lock()
+	r.closing = true
+	r.mu.Unlock()
+	if r.helloDueLocked(now.Add(time.Hour)) {
+		t.Fatal("announced while closing")
+	}
+}
+
+// The interval is re-drawn on each send, so a mesh full of clients started
+// together does not stay in step.
+func TestHelloIntervalIsJittered(t *testing.T) {
+	r := newTestRemote(Callbacks{})
+	r.uid = uidN(203)
+
+	seen := map[time.Duration]int{}
+	for i := 0; i < 200; i++ {
+		d := nextHelloInterval()
+		if d < helloBaseInterval || d > helloBaseInterval+helloJitterInterval {
+			t.Fatalf("interval %v outside %v..%v", d, helloBaseInterval, helloBaseInterval+helloJitterInterval)
+		}
+		seen[d]++
+	}
+	if len(seen) < 50 {
+		t.Fatalf("only %d distinct intervals in 200 draws; the jitter is not varying", len(seen))
+	}
+
+	// and a send re-draws it rather than leaving the first value forever
+	r.mu.Lock()
+	r.helloInterval = 0
+	r.mu.Unlock()
+	r.txHello()
+	r.mu.Lock()
+	got := r.helloInterval
+	r.mu.Unlock()
+	if got < helloBaseInterval {
+		t.Fatalf("interval after a send = %v, want it re-drawn", got)
+	}
+}
+
+// The decision and the send are tested above; this drives the loop that joins
+// them. Without it, deleting the call from the probe leaves every other hello
+// test green — the pieces work and nothing announces.
+func TestProbeLoopAnnouncesHello(t *testing.T) {
+	r := newTestRemote(Callbacks{})
+	r.uid = uidN(204)
+
+	got := make(chan struct{}, 1)
+	r.mu.Lock()
+	r.lastHello = time.Now().Add(-time.Hour) // long overdue
+	r.helloInterval = time.Millisecond
+	r.txTap = func(b []byte) {
+		if len(b) >= headerLen && binary.LittleEndian.Uint16(b[20:22]) == opSysHello {
+			select {
+			case got <- struct{}{}:
+			default:
+			}
+		}
+	}
+	r.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.wg.Add(1)
+	go r.backgroundProbe(ctx)
+
+	select {
+	case <-got:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the probe loop never announced, though the hello was overdue")
+	}
+	cancel()
+	r.wg.Wait()
 }
