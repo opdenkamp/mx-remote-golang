@@ -9,6 +9,14 @@ package mxremote
 // Handlers are invoked sequentially from a single dispatcher goroutine, so they
 // must not block for long. It is safe to call Remote/Device/Bay methods from a
 // handler.
+//
+// A handler that panics takes the process with it. Handlers run on goroutines
+// this library owns — the receive loop and the background probe — and an
+// unrecovered panic in any goroutine ends the program, so there is nowhere for
+// a caller to put a recover of its own. Not recovering on the caller's behalf
+// is deliberate: this library has no logger, so a recover here would swallow
+// the panic in silence and hide the bug rather than surface it. Recover inside
+// the handler if a panic there should not be fatal.
 type Callbacks struct {
 	// Device-level events.
 	OnDeviceConfigChanged       func(d *Device)
