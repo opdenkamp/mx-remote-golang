@@ -42,6 +42,7 @@ type Bay struct {
 	encoderDisabled *bool
 	signalType      *string
 	signalDetails   *BaySignalDetails
+	signalMode      MxrSignalType
 	filtered        []DeviceUID
 	arc             string
 	audioVolume     *VolumeMuteStatus
@@ -262,6 +263,19 @@ func (b *Bay) SignalType() string {
 		return *b.signalType
 	}
 	return "unknown"
+}
+
+// SignalMode returns the signal type carried alongside the description in the
+// bay configuration: the svd, colour space and bit depth the bay reports.
+//
+// This comes from the configuration broadcast, which arrives for every bay;
+// SignalDetails carries the same kind of value from a signal status report,
+// which is only sent for the bay it concerns.
+func (b *Bay) SignalMode() MxrSignalType {
+	r := b.dev.remote
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return b.signalMode
 }
 
 // SignalDetails returns the detail block from the bay's last signal status
@@ -587,6 +601,7 @@ func (b *Bay) applyBayConfig(cfg bayConfig) {
 		b.mbayID = &v
 	}
 	b.applyBayStatus(cfg.status)
+	b.signalMode = cfg.signalMode
 	if !cfg.status.Has(BayStatusSignalDetected) || !b.dev.isV2IP() {
 		b.setSignalType(cfg.signalType)
 	}

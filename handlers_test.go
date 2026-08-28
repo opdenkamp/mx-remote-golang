@@ -314,3 +314,90 @@ func TestV2IPSourceSwitch(t *testing.T) {
 		t.Fatalf("video source did not resolve to the advertising device: %v", v)
 	}
 }
+
+// parseBayConfig underpins most of the public API - names, ports, sources,
+// EDID profile, RC target, status and features all come from this one record.
+// Every field is given a distinct value so that reading any of them at a
+// neighbour's offset changes the result.
+func TestBayConfigEveryField(t *testing.T) {
+	// mxr_bay_data, packed: port 0, mode 1, bay 2, a 2-byte union at 3, name 5,
+	// user_name 21, mxr_cfg_signal 37 (14-byte description + 2-byte type),
+	// status 53, features 57. 61 bytes.
+	rec := make([]byte, bayConfigSize)
+	rec[0] = 7                          // port
+	rec[1] = 1                          // mode: output
+	rec[2] = 3                          // bay number
+	rec[3] = 11                         // video source / low byte of the edid+rc union
+	rec[4] = 22                         // audio source / high byte of that union
+	copy(rec[5:21], "0123456789ABCDEF") // fills the field: no terminator
+	copy(rec[21:37], "Living Room TV")
+	copy(rec[37:51], "1080p60 444 8b") // exactly 14: no terminator either
+	binary.LittleEndian.PutUint16(rec[51:53], 0x2013)
+	binary.LittleEndian.PutUint32(rec[53:57], uint32(BayStatusHidden))
+	binary.LittleEndian.PutUint32(rec[57:61], uint32(BayHDMIOut))
+
+	c := parseBayConfig(rec)
+	if c.port != 7 || c.modenum != 1 || c.bay != 3 {
+		t.Fatalf("port/mode/bay = %d/%d/%d, want 7/1/3", c.port, c.modenum, c.bay)
+	}
+	if c.videoSource != 11 || c.audioSource != 22 {
+		t.Fatalf("sources = %d/%d, want 11/22", c.videoSource, c.audioSource)
+	}
+	// the same two bytes are a 12-bit EDID profile and a 4-bit RC target on a
+	// source bay: 0x1600|11 low twelve, 0x1 high four
+	if want := (int(22&0x0F) << 8) | 11; c.edidProfile != want {
+		t.Fatalf("edid profile = %d, want %d", c.edidProfile, want)
+	}
+	if c.rcType != 1 {
+		t.Fatalf("rc target = %d, want 1", c.rcType)
+	}
+	if c.bayName != "0123456789ABCDEF" {
+		t.Fatalf("bay name = %q", c.bayName)
+	}
+	if c.userName != "Living Room TV" {
+		t.Fatalf("user name = %q", c.userName)
+	}
+	// the description stops at 14; the two bytes after it are the signal type
+	if c.signalType != "1080p60 444 8b" {
+		t.Fatalf("signal description = %q, want %q", c.signalType, "1080p60 444 8b")
+	}
+	if c.signalMode.Svd() != 0x13 || c.signalMode.Bpp() != 8 {
+		t.Fatalf("signal mode = %v (svd %d, bpp %d)", c.signalMode, c.signalMode.Svd(), c.signalMode.Bpp())
+	}
+	if c.status != BayStatusHidden {
+		t.Fatalf("status = %v, want %v", c.status, BayStatusHidden)
+	}
+	if c.features != BayHDMIOut {
+		t.Fatalf("features = %v, want %v", c.features, BayHDMIOut)
+	}
+}
+
+// The same record reaching a bay through the dispatcher.
+func TestBayConfigReachesTheBay(t *testing.T) {
+	r := newTestRemote(Callbacks{})
+	sender := uidN(130)
+	feed := feeder(r, sender)
+	feed(opSysHello, helloPayload(0x28, "FF88", "BC0001", "4.8.0", FeatureVideoRouting))
+
+	rec := bayConfigRec(9, 1, 2, "Output 9", "Kitchen", BayStatusHidden, BayHDMIOut)
+	copy(rec[37:51], "2160p50 420 10")
+	binary.LittleEndian.PutUint16(rec[51:53], 0x4062) // svd 98, bpp index 2 = 10
+	feed(opSysBayConfig, rec)
+
+	bay := r.GetByUID(sender).GetByPortnum(9)
+	if bay == nil {
+		t.Fatal("bay 9 was not registered")
+	}
+	if bay.UserName() != "Kitchen" || bay.BayName() != "Output 9" {
+		t.Fatalf("names = %q / %q", bay.UserName(), bay.BayName())
+	}
+	if !bay.Hidden() || bay.Features() != BayHDMIOut {
+		t.Fatalf("hidden=%v features=%v", bay.Hidden(), bay.Features())
+	}
+	if bay.SignalType() != "2160p50 420 10" {
+		t.Fatalf("signal description = %q", bay.SignalType())
+	}
+	if m := bay.SignalMode(); m.Svd() != 98 || m.Bpp() != 10 {
+		t.Fatalf("signal mode = %v (svd %d, bpp %d)", m, m.Svd(), m.Bpp())
+	}
+}

@@ -24,6 +24,7 @@ type bayConfig struct {
 	bayName     string
 	userName    string
 	signalType  string
+	signalMode  MxrSignalType
 	status      BayStatusMask
 	features    BayFeaturesMask
 }
@@ -39,9 +40,13 @@ func parseBayConfig(p []byte) bayConfig {
 		rcType:      int(p[4]>>4) & 0x0F,
 		bayName:     cstr(p[5:21]),
 		userName:    cstr(p[21:37]),
-		signalType:  cstr(p[37:53]),
-		status:      BayStatusMask(binary.LittleEndian.Uint32(p[53:57])),
-		features:    BayFeaturesMask(binary.LittleEndian.Uint32(p[57:61])),
+		// mxr_cfg_signal is a 14-byte description followed by a 2-byte
+		// mxr_signal_type, not a 16-byte string: a description filling its
+		// field would otherwise run into the type bytes
+		signalType: cstr(p[37:51]),
+		signalMode: MxrSignalType(binary.LittleEndian.Uint16(p[51:53])),
+		status:     BayStatusMask(binary.LittleEndian.Uint32(p[53:57])),
+		features:   BayFeaturesMask(binary.LittleEndian.Uint32(p[57:61])),
 	}
 }
 
