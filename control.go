@@ -325,6 +325,15 @@ func (b *Bay) SelectVideoSourceByUserName(name string) error {
 func (b *Bay) SelectAudioSourceByName(name string, format *V2IPAudioFormat) error {
 	r := b.dev.remote
 	r.mu.Lock()
+	// this one sends its address two ways, so gate on whichever it will use
+	op := opV2IPSourceSwitch
+	if format != nil {
+		op = opV2IPManualSrcSwitch
+	}
+	if err := b.dev.requireOpcodeLocked(op); err != nil {
+		r.mu.Unlock()
+		return err
+	}
 	if !b.isV2IPSink() {
 		r.mu.Unlock()
 		return errNotV2IPSink

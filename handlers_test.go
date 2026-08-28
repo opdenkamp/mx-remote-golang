@@ -657,6 +657,11 @@ func TestEveryGuardedSendChecksTheProtocolFloor(t *testing.T) {
 			{"SetZoneSettings", func() error { return out.SetZoneSettings(AmpZoneSettings{}) }},
 			{"ReadStats", func() error { return dev.ReadStats(true) }},
 			{"AudioMute", func() error { return dev.AudioMute(1, true) }},
+			{"SelectAudioSourceByName", func() error { return out.SelectAudioSourceByName("Apple TV", nil) }},
+			{"SelectAudioSourceByName/fmt", func() error {
+				return out.SelectAudioSourceByName("Apple TV", &V2IPAudioFormat{SampleRate: 48000, Channels: 2})
+			}},
+			{"SelectVideoSourceByUserName", func() error { return out.SelectVideoSourceByUserName("Apple TV") }},
 			{"Multiviewer.SetViewMode", func() error { return mv.SetViewMode(MVViewPIP) }},
 		}
 	}
