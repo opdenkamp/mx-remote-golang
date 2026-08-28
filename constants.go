@@ -6,7 +6,7 @@ package mxremote
 // Library and protocol versions.
 const (
 	// Version is the version of this library.
-	Version = "2.0.0"
+	Version = "2.1.0"
 
 	// ProtocolVersion is the highest MX Remote protocol version understood.
 	ProtocolVersion uint16 = 0x28
