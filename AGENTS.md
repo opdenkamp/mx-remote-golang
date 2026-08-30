@@ -16,11 +16,13 @@ endpoints, amplifier settings, and diagnostics.
   -u` from a v1 consumer would silently pull breaking changes.
 - Single flat package (no subpackages). Public API is exported; all wire/frame
   machinery is unexported.
-- The reference implementation is the Python library at `../mx-remote`. The Go
-  API is idiomatic and does NOT mirror the Python class layout — but the **wire
-  protocol must stay byte-for-byte compatible** (it talks to embedded devices).
-- A Rust port at `../mx-remote-rust` decodes the same opcodes and treats this
-  file as the protocol reference. A wire-level finding here belongs in both.
+- The reference implementation is the Python client at
+  <https://github.com/opdenkamp/mx-remote>. The Go API is idiomatic and does NOT
+  mirror the Python class layout — but the **wire protocol must stay
+  byte-for-byte compatible** (it talks to embedded devices).
+- A Rust port at <https://github.com/opdenkamp/mx-remote-rust> decodes the same
+  opcodes and treats this file as the protocol reference. A wire-level finding
+  here belongs in both.
 - User-facing documentation lives in `README.md` and `docs/`; this file is for
   agents and carries what the protocol costs to get wrong. An API change means
   the matching `docs/` page changes with it.
@@ -96,24 +98,28 @@ ProAmp8 on 4.1.1 reports `0x11`, below the floor of several opcodes here, so
 this is not hypothetical. A device that has reported no version is allowed
 through — not knowing is not the same as knowing it is too old.
 
-`0x08` MX_ROUTE is decoded but no MatrixOS build transmits it:
-`mxr_bay_broadcast_routes()` has a declaration and a definition and no callers.
-The decoder still has to be right for third-party controllers, but do not
-expect one on a live mesh, and do not treat its absence as a bug.
+`0x08` MX_ROUTE is decoded but no MatrixOS build transmits it: the firmware's
+route-broadcast helper is defined and never called. The decoder still has to be
+right for third-party controllers, but do not expect one on a live mesh, and do
+not treat its absence as a bug.
 
 ## Working on the protocol
 
-**`PACKED` is the exception in this protocol, not the rule.**
-`mx_remote_proto.h` mixes `struct PACKED`, `struct ALIGN(8)` and plain `struct`
-freely, and only the `PACKED` ones can be decoded by summing field widths. On
-the others the compiler inserts padding, so derive offsets from the declaration
-and check `sizeof` — three separate decode bugs here came from summing widths
-across a plain struct. Two recurring traps:
+**Packed structs are the exception in this protocol, not the rule.** The
+firmware declares its protocol structs packed, 8-byte-aligned and plain by
+turns, and only the packed ones can be decoded by summing field widths. On the
+others the compiler inserts padding — three separate decode bugs here came from
+summing widths across a plain struct. Two recurring traps:
 
-- `TMTicks` is `uint_fast32_t`, so it aligns to 4 and pads whatever precedes it.
-- Where the firmware appends a variable-length tail at `sizeof(struct)`, the
-  tail starts after the struct's *own* trailing padding, not at the end of its
-  last field (`0x48` RC_IR_TX: timings at 36, not 34).
+- Tick timestamps are `uint_fast32_t`, so they align to 4 and pad whatever
+  precedes them.
+- Where the firmware appends a variable-length tail after a struct, the tail
+  starts after the struct's *own* trailing padding, not at the end of its last
+  field (`0x48` RC_IR_TX: timings at 36, not 34).
+
+The firmware is closed source and no copy of it ships with this repository, so
+a layout this file does not already pin has to be settled against a captured
+frame or the Python and Rust clients, never guessed from field widths.
 
 **Ask where a wire value first becomes a typed thing, before asking where it
 is decoded.** Those are rarely the same file, and the narrowing boundary is
@@ -213,7 +219,7 @@ differs frame to frame. The offsets still line up either way, which is why this
 survives a cross-check between two implementations: only the field itself is
 wrong, and it reads as a value that changes while the setting does not. Mask to
 the field's real width rather than asserting the neighbouring bytes are zero
-(`rc_target_t` at `0x45`+16 is one byte, not four).
+(the RC target enum at `0x45`+16 is one byte, not four).
 
 **Ask what an instrument cannot say before believing what it does.** Three
 checks here find three different things, and each is silent about the others:
@@ -283,18 +289,19 @@ at what the extracted value is then converted into.
 
 **Do not mirror a firmware receiver without asking whether its handling is
 defensible.** Firmware predating the fix builds `0x3C` from an uninitialised
-`mxr_scaling_config` and ORs flags onto stack garbage, so on a receiver-capable
+scaling-config struct and ORs flags onto stack garbage, so on a receiver-capable
 unit bits 2..6 of the scaling flags are noise and `MODE_VALID` can be set
 spuriously (leaving `mode` and `refresh` behind it uninitialised). The
 firmware's own receiver copies the whole top nibble; this library carries bit 7
 alone, because caching noise as though it meant something is worse than
 matching the reference.
 
-Byte layouts must match the firmware/Python exactly. To verify a TX frame,
-generate a reference vector from the Python library (stub an `mxr` with
-`uid_raw`/`name`, call the `Frame*.construct`, print `.frame.hex()`) and assert
-it in `wire_test.go`. RX offsets are validated end-to-end in `state_test.go` and
-`subsystems_test.go` by feeding synthetic frames through `processFrame`.
+Byte layouts must match the firmware and the Python client exactly. To verify
+a TX frame, generate a reference vector from the Python client (stub an `mxr`
+with `uid_raw`/`name`, call the `Frame*.construct`, print `.frame.hex()`) and
+assert it in `wire_test.go`. RX offsets are validated end-to-end in
+`state_test.go` and `subsystems_test.go` by feeding synthetic frames through
+`processFrame`.
 
 Adding a new opcode:
 1. Add the constant to `constants.go`.
@@ -312,11 +319,11 @@ Adding a new opcode:
 ## Coverage
 
 The dispatch table decodes every opcode the firmware still uses. To re-check
-after a firmware bump, diff `frameHandlers` against `MXR_OPCODE()` in
-`mx_opcodes.h`, and establish "still in use" from the firmware source: an
-opcode is live if it has an `mxr_register_opcode()` call or a transmit site.
-There are **two** transmit paths — `mxr_pbuf_alloc()` and `mxr_tx_bytes()` —
-and grepping only the first wrongly reports the bare command opcodes as dead.
+after a firmware bump, diff `frameHandlers` against the firmware's opcode table:
+an opcode is live if it registers a handler or has a transmit site. The firmware
+has **two** transmit paths, one allocating a packet buffer and one writing bytes
+directly, and searching only the first wrongly reports the bare command opcodes
+as dead.
 
 Deliberately left undecoded, because nothing in the firmware references them
 outside the opcode table itself: `0x06` DEV_SIGNAL_OLD, `0x2D`
@@ -324,7 +331,7 @@ VIDEO_CLOCK_RATE_OLD, `0x36` SET_MASTER, `0x47` DEBUG, and `0x17`–`0x1E`, the
 eight CEC opcodes that were specified and never implemented. The reference
 Python library still decodes some of these for older firmware.
 
-`0x2E`/`0x2F` V2IP_BLIST_* are decoded but `V2IP_SUPPORT_BLACKLIST` is `0` in
+`0x2E`/`0x2F` V2IP_BLIST_* are decoded but blacklist support is compiled out of
 shipping builds, so current firmware emits neither.
 
 Opcode-level coverage does not settle the **sub-opcodes**: `0x43` V2IP_AUDIO
@@ -336,16 +343,16 @@ populated anywhere in the package. That is what surfaced the audio gap.
 
 `0x42`'s parameters are deliberately exposed as raw bytes past its envelope
 (target uid, sub-opcode at 16, seven pad, params from 24). The multiviewer
-module owns the opcode, so there is no firmware source here to pin
-per-sub-command field semantics against.
+module owns the opcode, so no MatrixOS protocol definition pins its
+per-sub-command field semantics.
 
 Three decoders deliberately disagree with the reference Python library, which
 reads these at offsets its own C struct or frame builder contradicts:
 
-- `0x09` MX_SET_ROUTE — `mbay_port_id` is a `uint16`, so the bays are two bytes
+- `0x09` MX_SET_ROUTE — the bay port id is a `uint16`, so the bays are two bytes
   each and `no_power_on` is at 20. Python reads bytes at 16/17, which puts the
   sink bay's high byte in the source bay.
-- `0x0A` RC_IR — `mxr_ir_data` is not packed, so its `TMTicks` timestamp aligns
+- `0x0A` RC_IR — the IR data struct is not packed, so its tick timestamp aligns
   to 4 and the port's two bytes are followed by padding. Python reads the
   timestamp at 2.
 - `0x43` V2IP_AUDIO SELECT_INPUT — the sink is named twice (the command
@@ -362,7 +369,7 @@ control (deprecated) — the PDU *state* frame `0x16` is decoded, but nothing
 transmits PDU commands.
 
 `0x49` V2IP_VIDEOWALL is owned by the loadable v2ipwall module rather than
-MatrixOS, so its layout comes from `vw_mesh_frame` in that module rather than
+MatrixOS, so its layout comes from that module's own mesh frame rather than
 from this wire definition. Unlike `0x3C` it **replaces** rather than merges: no
 field carries a validity marker, and a zero width or height means "clear the
 wall", not "unset". A revert carries no window at all — see
