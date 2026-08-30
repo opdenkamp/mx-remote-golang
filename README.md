@@ -1,4 +1,4 @@
-# MX Remote for Go
+# MX Remote - Go Client for Pulse-Eight MatrixOS devices
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/opdenkamp/mx-remote-golang/v2.svg)](https://pkg.go.dev/github.com/opdenkamp/mx-remote-golang/v2)
 
