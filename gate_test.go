@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -413,13 +414,12 @@ func TestTheChokePointsAreStillChokePoints(t *testing.T) {
 		t.Fatal(err)
 	}
 	// No subpackage can hide a send: this is a single flat package by design,
-	// and examples/ is a separate module path that cannot reach unexported
-	// ones. Asserted as the exact expected set rather than "not more than one",
-	// because the latter also passes when the glob stops matching anything.
+	// examples/ is a separate module path that cannot reach unexported ones,
+	// and docs/ is prose, which the Go files check below holds it to. Asserted
+	// as the exact expected set rather than "not more than two", because the
+	// latter also passes when the search stops matching anything.
 	// filepath.Glob has no trailing-slash directory form, unlike a shell, so
-	// this reads entries and filters. The first version globbed "*/" and
-	// matched nothing at all — and passed, because it only checked there were
-	// not too many.
+	// this reads entries and filters.
 	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatal(err)
@@ -430,9 +430,17 @@ func TestTheChokePointsAreStillChokePoints(t *testing.T) {
 			dirs = append(dirs, e.Name())
 		}
 	}
-	if len(dirs) != 1 || dirs[0] != "examples" {
-		t.Errorf("subdirectories = %v, want exactly [examples]; this scan only reads "+
-			"the package root, so anything else could hold a send it never sees", dirs)
+	want := []string{"docs", "examples"}
+	if !reflect.DeepEqual(dirs, want) {
+		t.Errorf("subdirectories = %v, want exactly %v; this scan only reads "+
+			"the package root, so anything else could hold a send it never sees", dirs, want)
+	}
+	// docs/ is exempt from the scan because it is prose. That is only true for
+	// as long as it holds no Go.
+	if goFiles, err := filepath.Glob("docs/*.go"); err != nil {
+		t.Fatal(err)
+	} else if len(goFiles) != 0 {
+		t.Errorf("docs/ holds Go files %v; the scan never reads them", goFiles)
 	}
 
 	var buildSites, sendSites []string

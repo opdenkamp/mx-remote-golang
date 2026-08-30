@@ -21,6 +21,9 @@ endpoints, amplifier settings, and diagnostics.
   protocol must stay byte-for-byte compatible** (it talks to embedded devices).
 - A Rust port at `../mx-remote-rust` decodes the same opcodes and treats this
   file as the protocol reference. A wire-level finding here belongs in both.
+- User-facing documentation lives in `README.md` and `docs/`; this file is for
+  agents and carries what the protocol costs to get wrong. An API change means
+  the matching `docs/` page changes with it.
 
 ## Commands
 
