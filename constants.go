@@ -8,8 +8,15 @@ const (
 	// Version is the version of this library.
 	Version = "2.1.3"
 
-	// ProtocolVersion is the highest MX Remote protocol version understood.
-	ProtocolVersion uint16 = 0x28
+	// ProtocolVersion is the highest MX Remote protocol version understood. It
+	// is announced in the hello frame and stamped on an opcode with no floor of
+	// its own; nothing on the receive path consults it, since a frame is
+	// decoded whatever it is stamped.
+	//
+	// Raising it declares that every layout up to that version is understood,
+	// so raise it only alongside the decoding. 0x29 is the decoder detail block
+	// of 0x3F V2IP_STATS.
+	ProtocolVersion uint16 = 0x29
 )
 
 // Network defaults.
@@ -138,9 +145,15 @@ const (
 // everything would make a device with a lower cap - a ProAmp8 caps at 0x22 -
 // silently drop every frame we send.
 //
-// These stay deliberately low. An opcode whose payload only ever grew trailing
-// fields keeps its original version, and a receiver tells the formats apart by
-// payload length instead.
+// These stay deliberately low, and diverge from the firmware's own table where
+// they have to. An opcode whose payload only ever grew trailing fields keeps
+// its original version, and a receiver tells the formats apart by payload
+// length instead: 0x3F V2IP_STATS is 0x29 in the firmware's table since the
+// decoder block was appended, and 0x13 here, because the gate is a ceiling
+// with no per-opcode minimum. 0x13 is accepted by every version, where a
+// 0x29-stamped request is dropped outright by any firmware predating the
+// block - costing the counters, not merely the block. Raising it here would also make
+// requireOpcodeLocked refuse every device below 0x29 outright.
 //
 // Opcodes 0x25 and 0x33 are retired and reserved at version 0x00. They were
 // live in an earlier generation, so an old unit would decode a frame sent on
