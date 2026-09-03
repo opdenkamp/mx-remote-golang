@@ -321,7 +321,7 @@ type DeviceV2IPDetails struct {
 }
 
 // Valid reports whether a stream source carries a usable address: a multicast
-// IP and a non-zero port, both (firmware mxr_v2ip_stream_valid).
+// IP and a non-zero port, both — the firmware's own validity test.
 func (s V2IPStreamSource) Valid() bool {
 	ip := net.ParseIP(s.IP)
 	return ip != nil && ip.To4() != nil && ip.IsMulticast() && s.Port != 0
@@ -382,8 +382,8 @@ type BaySignalDetails struct {
 	ClockRate uint32
 }
 
-// MxrSignalType is the 2-byte mxr_signal_type carried in scaling configs and
-// bay signal reports.
+// MxrSignalType is the 2-byte signal type carried in scaling configs and bay
+// signal reports.
 //
 // Byte 0 is the CTA-861 svd (0 when the signal is not HDMI); byte 1 packs
 // color:4 in the low nibble, then non_int:1 and bpp:3 in the top bits.

@@ -101,7 +101,7 @@ type V2IPPowerSaveRequest struct {
 // RCSettings is the remote-control configuration of a source bay.
 type RCSettings struct {
 	Target DeviceUID
-	// RCTarget selects the control method (rc_target_t). It is a single byte:
+	// RCTarget selects the control method. It is a single byte:
 	// the enum is plain and Cortex-M builds with -fshort-enums, so three bytes
 	// of padding follow it before IP. That padding is not zero - firmware
 	// memcpys an uncleared stack local over the payload - so widening this to a
@@ -113,7 +113,7 @@ type RCSettings struct {
 	CECAutoOn  bool
 	ForwardRC  bool
 	ForwardIR  bool
-	// RCStatus is the driver state on the source (mxr_rc_status_t). A value
+	// RCStatus is the driver state on the source. A value
 	// above the last one this library knows is passed through as-is rather than
 	// clamped, so a firmware update cannot make it read as a known state.
 	RCStatus uint8
