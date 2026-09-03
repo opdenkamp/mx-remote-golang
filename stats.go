@@ -131,11 +131,16 @@ const (
 	// previous value and clears on the first reading after things settle,
 	// which Updates cannot tell apart from a fresh reading.
 	DecoderReasonTxBridgeUnlocked V2IPDecoderReason = 9
-	// DecoderReasonIdle is a configured sink that is not enabled. Devices are
-	// not observed to report it: a sink switched off deliberately reports
-	// DecoderReasonNoPackets and holds there, indistinguishable from one whose
-	// source is dead. Nothing in this block says a sink was switched off on
-	// purpose - ask V2IP_DEVICE_CFG or the device HTTP status instead.
+	// DecoderReasonIdle is a configured sink that is not enabled, and it
+	// outranks every cause below it. The causes it outranks stay set in Flags,
+	// because they are what the decoder genuinely observed - so a fault check
+	// has to test this one first and stop, or it calls a deliberately
+	// switched-off sink broken.
+	//
+	// Its absence says nothing: firmware that predates it reports
+	// DecoderReasonNoPackets for the same sink, indistinguishable from one
+	// whose source is dead. Nothing in this block answers enablement in either
+	// direction - ask V2IP_DEVICE_CFG or the device HTTP status instead.
 	DecoderReasonIdle V2IPDecoderReason = 10
 )
 
@@ -220,6 +225,11 @@ type V2IPDecoderDetail struct {
 	// Width and Height are recovered from the codestream, pre-scaler and
 	// unrounded, and are 0 when nothing was recovered. They, not Format, are
 	// what says whether the decoder recovered anything - see Recovered.
+	//
+	// They are read before any reason is decided, so they answer what the
+	// decoder currently detects and never whether the sink is enabled: a
+	// sink reporting DecoderReasonIdle with a populated geometry is a normal
+	// steady state, not a stale reading.
 	Width  uint16
 	Height uint16
 
@@ -248,6 +258,10 @@ type V2IPDecoderDetail struct {
 	// nothing applies; DecoderReasonNoFormat and DecoderReasonFormatMismatch
 	// are the two arms of one decision and never both appear; and the priority
 	// ranks behind Reason are stable when a value is appended.
+	//
+	// The word is every cause, not the surviving one, so a mask of the causes
+	// a caller treats as faults is wrong on its own: see DecoderReasonIdle,
+	// which outranks causes that remain set beneath it.
 	Flags uint32
 
 	// BlockedCount is how many times the converter watchdog has triggered.
@@ -262,6 +276,9 @@ func (d *V2IPDecoderDetail) Recovered() bool { return d.Width != 0 && d.Height !
 // HasReason reports whether cause r is among those that apply, including a
 // cause this library has no name for. DecoderReasonOK is never among them:
 // the flags word carries causes, and bit 0 is unused.
+//
+// It reports the word as it arrived and suppresses nothing, so a caller
+// ranking one cause over another does that itself - see DecoderReasonIdle.
 func (d *V2IPDecoderDetail) HasReason(r V2IPDecoderReason) bool {
 	return r != DecoderReasonOK && r < 32 && d.Flags&(1<<uint(r)) != 0
 }

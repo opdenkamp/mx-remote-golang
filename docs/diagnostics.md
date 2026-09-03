@@ -59,18 +59,22 @@ are distinct and mean different things:
 | true | nil | it does, and the decoder has never answered |
 | true | non-nil | a reading |
 
-`valid` follows the sink being *configured*, not enabled, so a configured sink
-that is switched off still reports. It does **not** say that it was switched
-off: it reports `DecoderReasonNoPackets` and holds there, indistinguishable
-from a sink whose source is dead. Nothing in this block distinguishes the two —
-ask `V2IP_DEVICE_CFG` or the device HTTP status.
+A configured sink reports whether or not it is enabled, and **nothing in this
+block answers enablement in either direction.** Newer firmware names a disabled
+sink `DecoderReasonIdle`; firmware predating that reports
+`DecoderReasonNoPackets` for the same sink, indistinguishable from one whose
+source is dead — so no `DecoderReasonIdle` is not evidence a sink is on. Ask
+`V2IP_DEVICE_CFG` or the device HTTP status.
 
 Three things routinely get read wrong here:
 
 - **Geometry, not `Format`, says whether anything was recovered.** With no
   stream `Format` reads `DecoderFormatRGB`, which a real RGB stream is
   indistinguishable from, so treating format 0 as no-signal reports a dead sink
-  on a live one. `Decoder.Recovered()` asks the question correctly.
+  on a live one. `Decoder.Recovered()` asks the question correctly — about the
+  codestream, which is not the same question as whether the sink is enabled.
+  Geometry is read before any reason is decided, so an idle sink reporting a
+  picture is a normal steady state rather than a stale reading.
 - **`DecoderFormatUnnamed` is 255, and is not the `0xF` that means unknown in
   `MxrSignalType.ColourSpace`.** The two do not convert into one another.
 - **Colour depth is absent and stays absent**, because it is not recovered
@@ -92,6 +96,21 @@ a restart loop entirely.
 ```go
 if dec.HasReason(DecoderReasonTxBridgeUnlocked) {
     // true whether or not it is what Reason names
+}
+```
+
+**Test `DecoderReasonIdle` first and stop.** It outranks every cause below it,
+and those causes stay set — they are what the decoder genuinely observed, and
+`HasReason` reports the word as it arrived rather than suppressing them. A
+plain mask of the causes you treat as faults therefore calls a deliberately
+switched-off sink broken.
+
+```go
+switch {
+case dec.HasReason(DecoderReasonIdle):
+    // configured, not enabled — not a fault, whatever else is set
+case dec.HasReason(DecoderReasonNoPackets):
+    // ...
 }
 ```
 

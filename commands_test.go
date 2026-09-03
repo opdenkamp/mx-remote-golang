@@ -1379,6 +1379,61 @@ func TestFactoryResetIgnoresUnknownForm(t *testing.T) {
 	}
 }
 
+// A disabled sink is named idle, and the causes idle outranks stay set: they
+// are what the decoder observed. The accessor must report the word as it
+// arrived, since ranking one cause over another is the caller's job.
+//
+// The flags word here is not asserted whole. Which causes accompany bit 10 is
+// a firmware detail that moves as the firmware gets more correct, and a
+// fixture pinning the exact word would call that a regression.
+func TestV2IPDecoderIdleDoesNotSuppressLesserCauses(t *testing.T) {
+	d := append([]byte(nil), decoderVector...)
+	d[1] = byte(DecoderReasonIdle)
+	binary.LittleEndian.PutUint32(d[12:16], 1<<DecoderReasonNoPackets|
+		1<<DecoderReasonNoFormat|1<<DecoderReasonSwitchPending|1<<DecoderReasonIdle)
+
+	r, sender, feed := cmdRemote(t, 89, Callbacks{})
+	feed(opV2IPStats, statsPayload(v2ipStatsSize+decoderDetailSize, d))
+
+	dec := r.GetByUID(sender).V2IPStats().Decoder
+	if dec == nil || dec.Reason != DecoderReasonIdle {
+		t.Fatalf("decoder = %+v", dec)
+	}
+	for _, r := range []V2IPDecoderReason{
+		DecoderReasonIdle,
+		DecoderReasonNoPackets,
+		DecoderReasonNoFormat,
+		DecoderReasonSwitchPending,
+	} {
+		if !dec.HasReason(r) {
+			t.Errorf("HasReason(%v) = false, want true beneath idle", r)
+		}
+	}
+	if dec.HasReason(DecoderReasonDegraded) {
+		t.Error("HasReason(degraded) = true, but its bit is clear")
+	}
+}
+
+// Geometry is read before any reason is decided, so an idle sink reporting a
+// picture is a normal steady state. Nothing may infer sink state from it.
+func TestV2IPDecoderIdleKeepsItsGeometry(t *testing.T) {
+	d := append([]byte(nil), decoderVector...)
+	d[1] = byte(DecoderReasonIdle)
+	binary.LittleEndian.PutUint32(d[12:16], 1<<DecoderReasonIdle)
+
+	r, sender, feed := cmdRemote(t, 90, Callbacks{})
+	feed(opV2IPStats, statsPayload(v2ipStatsSize+decoderDetailSize, d))
+
+	dec := r.GetByUID(sender).V2IPStats().Decoder
+	if dec == nil || dec.Reason != DecoderReasonIdle {
+		t.Fatalf("decoder = %+v", dec)
+	}
+	if dec.Width != 3840 || dec.Height != 2160 || !dec.Recovered() {
+		t.Errorf("geometry = %dx%d recovered=%v, want 3840x2160 recovered",
+			dec.Width, dec.Height, dec.Recovered())
+	}
+}
+
 // No payload length may panic a handler. A length gate placed in front of the
 // wrong thing breaks this invariant rather than merely mis-filing a frame: the
 // slicing that reads a fixed block is bounded by a gate elsewhere in the
