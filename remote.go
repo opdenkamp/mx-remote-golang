@@ -412,6 +412,13 @@ func (r *Remote) txHello() {
 	name := r.name
 	r.mu.Unlock()
 
+	// Never append a field here. Receivers read a payload's length as a
+	// minimum nearly everywhere, but the hello is checked exactly, so a longer
+	// one is discarded rather than read up to the part the receiver knows. A
+	// hello is how this client stops being unknown, so a receiver that drops it
+	// never registers us and ignores everything that follows as coming from a
+	// stranger. Fixing receivers does not lift this: the ones already deployed
+	// are the ones that decide whether this client is seen at all.
 	payload := make([]byte, 0, 54)
 	payload = append(payload, byte(ProtocolVersion&0xFF), byte(ProtocolVersion>>8))
 	payload = appendFixedStr(payload, name, 16)
