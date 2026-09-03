@@ -753,3 +753,77 @@ func TestTransmitGatesAtTheChokePoint(t *testing.T) {
 		t.Fatalf("broadcast was refused: %v", err)
 	}
 }
+
+// volumeSetPair registers two devices that each own a bay with volume control,
+// so a frame addressing one of them cannot pass by landing on the other.
+func volumeSetPair(t *testing.T) (*Remote, *Device, *Device, func(uint16, []byte)) {
+	t.Helper()
+	r, sender, feed := bayStateRemote(t, 120, Callbacks{})
+
+	target := uidN(121)
+	tfeed := feeder(r, target)
+	tfeed(opSysHello, helloPayload(0x28, "FF88", "HD0002", "4.8.0", FeatureVideoRouting))
+	tfeed(opSysBayConfig, bayConfigRec(2, 1, 0, "Output 1", "TV", 0, BayHDMIOut|BayAudioAmpOut))
+
+	return r, r.GetByUID(sender), r.GetByUID(target), feed
+}
+
+// The uid in an AUDIO_SET_VOLUME payload names the device whose bay changes,
+// which is not the sender: a controller sets a volume on a bay it does not own,
+// and for every such frame the two uids differ.
+func TestVolumeSetAddressesTheTargetUID(t *testing.T) {
+	r, sender, target, feed := volumeSetPair(t)
+	_ = r
+
+	tuid := target.UID()
+	p := append(append([]byte(nil), tuid[:]...), 2, 0, 40, 45, 0, 0, 0, 0)
+	feed(opAudioSetVolume, p)
+
+	if v := target.GetByPortnum(2).VolumeStatus(); v == nil || v.VolumeLeft != 40 || v.VolumeRight != 45 {
+		t.Errorf("target bay volume = %+v, want 40/45", v)
+	}
+	if v := sender.GetByPortnum(2).VolumeStatus(); v != nil {
+		t.Errorf("sender bay volume = %+v, want untouched", v)
+	}
+}
+
+// A sender predating the widening of the bay id carries a one-byte bay, which
+// puts the three settings at 17, 18 and 19 and the whole payload at 20 bytes.
+// Both forms stamp the same protocol floor, so length is what separates them.
+func TestVolumeSetLegacyBayWidth(t *testing.T) {
+	_, sender, _, feed := volumeSetPair(t)
+
+	suid := sender.UID()
+	p := append(append([]byte(nil), suid[:]...), 2, 40, 45, 0)
+	if len(p) != 20 {
+		t.Fatalf("legacy payload = %d bytes, want 20", len(p))
+	}
+	feed(opAudioSetVolume, p)
+
+	if v := sender.GetByPortnum(2).VolumeStatus(); v == nil || v.VolumeLeft != 40 || v.VolumeRight != 45 {
+		t.Errorf("legacy volume = %+v, want 40/45", v)
+	}
+}
+
+// 0xFF in a settable field asks for it to be left alone, so it must not be
+// decoded as a value. Mute is the field where the sentinel is a valid-looking
+// reading: as a bitmask it means both channels muted.
+func TestVolumeSetMuteSentinelLeavesMuteAlone(t *testing.T) {
+	_, sender, _, feed := volumeSetPair(t)
+	bay := sender.GetByPortnum(2)
+
+	muted := false
+	bay.setVolumeStatus(VolumeMuteStatus{VolumeLeft: -1, VolumeRight: -1, MutedLeft: &muted, MutedRight: &muted})
+
+	suid := sender.UID()
+	p := append(append([]byte(nil), suid[:]...), 2, 0, 40, 45, 0xFF, 0, 0, 0)
+	feed(opAudioSetVolume, p)
+
+	v := bay.VolumeStatus()
+	if v == nil || v.MutedLeft == nil || v.MutedRight == nil {
+		t.Fatalf("volume = %+v", v)
+	}
+	if *v.MutedLeft || *v.MutedRight {
+		t.Errorf("mute = %v/%v, want the earlier false left alone", *v.MutedLeft, *v.MutedRight)
+	}
+}

@@ -253,16 +253,18 @@ func TestControlMethodsRoundTrip(t *testing.T) {
 		}
 	})
 
-	// keyed off whoever sent the frame, so it lands on the peer's bay
+	// addressed by the uid in the payload, like the frames above. VolumeSet
+	// updates the addressed bay optimistically once the frame is away, but the
+	// send fails here for want of a socket and returns before it does, so both
+	// bays enter this unset and each assertion measures the receive path.
 	t.Run("VolumeSet", func(t *testing.T) {
 		f := false
 		roundTrip(t, func() error { return out.VolumeSet(37, &f) })
-		v := peerOut.VolumeStatus()
-		if v == nil || v.VolumeLeft != 37 {
-			t.Fatalf("volume round-tripped onto the sender's bay as %+v", v)
+		if v := out.VolumeStatus(); v == nil || v.VolumeLeft != 37 {
+			t.Fatalf("volume round-tripped onto the addressed bay as %+v", v)
 		}
-		if ov := out.VolumeStatus(); ov != nil && ov.VolumeLeft == 37 {
-			t.Fatal("volume also landed on the addressed bay; this handler is sender-keyed")
+		if v := peerOut.VolumeStatus(); v != nil {
+			t.Fatalf("volume landed on the sending controller's bay as %+v", v)
 		}
 	})
 }

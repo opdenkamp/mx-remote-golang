@@ -93,6 +93,11 @@ func (h HiddenStatus) String() string {
 	return "unknown"
 }
 
+// audioDontChange is what a settable audio field carries when the sender is
+// leaving it alone. Volume rejects it by exceeding 100, but as a mute bitfield
+// it reads as both channels muted, so mute has to test for it.
+const audioDontChange = 0xFF
+
 // MuteStatus decodes the per-channel mute bitfield (bit0=left, bit1=right).
 type MuteStatus uint8
 

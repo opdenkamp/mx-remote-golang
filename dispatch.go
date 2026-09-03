@@ -207,27 +207,50 @@ func handleRCAction(r *Remote, f *frame) {
 	bay.emitAction(RCAction(action))
 }
 
+// handleVolumeSet decodes mxr_set_volume_request: a target uid at 0, a u16 bay
+// at 16, then left volume, right volume and mute.
+//
+// The uid names the device whose bay changes, which is not the sender - a
+// controller sets the volume of a bay it does not own, and the two uids differ
+// for every such frame.
+//
+// A sender predating the widening of the bay id carries a one-byte bay, which
+// puts the three settings at 17, 18 and 19 and the whole payload at 20 bytes.
+// Both forms stamp the same protocol floor, so the length is what separates
+// them, and a current sender that stops after mute without the tail padding is
+// still longer than the earlier form.
 func handleVolumeSet(r *Remote, f *frame) {
-	dev := r.deviceFor(f)
+	if r.deviceFor(f) == nil {
+		return
+	}
+	p := f.payload()
+	if len(p) < 20 {
+		return
+	}
+	var uid DeviceUID
+	copy(uid[:], p[0:16])
+	dev := r.devices[uid]
 	if dev == nil {
 		return
 	}
-	port, ok := f.u16(16)
-	if !ok {
-		return
+	port, settings := int(binary.LittleEndian.Uint16(p[16:18])), 18
+	if len(p) <= 20 {
+		port, settings = int(p[16]), 17
 	}
-	bay := dev.getByPortnumLocked(int(port))
+	bay := dev.getByPortnumLocked(port)
 	if bay == nil {
 		return
 	}
 	vol := VolumeMuteStatus{VolumeLeft: -1, VolumeRight: -1}
-	if vl, ok := f.u8(18); ok && vl <= 100 {
+	if vl := p[settings]; vl <= 100 {
 		vol.VolumeLeft = int(vl)
 	}
-	if vr, ok := f.u8(19); ok && vr <= 100 {
+	if vr := p[settings+1]; vr <= 100 {
 		vol.VolumeRight = int(vr)
 	}
-	if m, ok := f.u8(20); ok {
+	// 0xFF asks for the field to be left alone; as a mask it would read as
+	// both channels muted, which the volumes cannot do since it exceeds 100.
+	if m := p[settings+2]; m != audioDontChange {
 		ms := MuteStatus(m)
 		l, rr := ms.Left(), ms.Right()
 		vol.MutedLeft = &l
