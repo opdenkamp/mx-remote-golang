@@ -763,7 +763,7 @@ func TestScalingOptionNoiseBitsAreNotCached(t *testing.T) {
 	}
 }
 
-// A real 0x3C from a 10.12.32-1 unit, captured off a live mesh. Expected values
+// A real 0x3C captured off a live mesh. Expected values
 // come from the sending unit's own configuration and from firmware behaviour,
 // not from what this decoder produces.
 var deviceCfgCapture = []byte{
@@ -862,5 +862,357 @@ func TestTilingCarriedVersusAbsent(t *testing.T) {
 	feed(opV2IPDeviceCfg, p)
 	if tl = r.GetByUID(sender).Tiling(); tl == nil || tl.Width != 0 {
 		t.Fatalf("an uncarried block overwrote the cached window: %v", tl)
+	}
+}
+
+// decoderVector is bytes 128..151 of a 0x3F payload, read identically by this
+// client, the Rust client and a decode of the firmware's struct declaration.
+//
+// It is composed rather than captured: no frame from a live sink exists in any
+// of the three trees, and two of the three readings are downstream of this
+// fixture, so agreement between them cannot catch a value all three took from
+// the same description. Only the firmware struct decode is independent of it.
+// Replace this with a captured frame when one is to hand.
+var decoderVector = []byte{
+	0x01, 0x04, 0x00, 0x77, 0x00, 0x0f, 0x70, 0x08,
+	0x02, 0x00, 0x58, 0x02, 0x10, 0x01, 0x10, 0x00,
+	0xa9, 0x86, 0x01, 0x00, 0xef, 0xbe, 0xad, 0xde,
+}
+
+// statsPayload builds a 0x3F payload of n bytes over poison, so a field read
+// one byte wide or one byte over returns a wrong value rather than a zero that
+// happens to match.
+func statsPayload(n int, decoder []byte) []byte {
+	p := poisoned(n)
+	if decoder != nil {
+		copy(p[v2ipStatsSize:], decoder)
+	}
+	return p
+}
+
+func TestV2IPDecoderVector(t *testing.T) {
+	r, sender, feed := cmdRemote(t, 81, Callbacks{})
+	feed(opV2IPStats, statsPayload(v2ipStatsSize+decoderDetailSize, decoderVector))
+
+	st := r.GetByUID(sender).V2IPStats()
+	if st == nil || !st.DecoderReported || st.Decoder == nil {
+		t.Fatalf("stats = %+v", st)
+	}
+	d := st.Decoder
+	// Reserved byte 3 is 0x77 here, so a Blocking read taken from it reads true.
+	if d.Reason != DecoderReasonFormatMismatch || d.Blocking {
+		t.Errorf("reason = %v, blocking = %v, want format mismatch / false", d.Reason, d.Blocking)
+	}
+	if d.Width != 3840 || d.Height != 2160 {
+		t.Errorf("geometry = %dx%d, want 3840x2160", d.Width, d.Height)
+	}
+	if d.Format != DecoderFormatYCbCr422 || d.Updates != 600 {
+		t.Errorf("format = %v, updates = %d, want YCbCr 4:2:2 / 600", d.Format, d.Updates)
+	}
+	if d.Flags != 0x00100110 || d.BlockedCount != 100009 {
+		t.Errorf("flags = %#08x, blocked = %d, want 0x00100110 / 100009", d.Flags, d.BlockedCount)
+	}
+	if !d.Recovered() {
+		t.Error("Recovered() = false for a 3840x2160 reading")
+	}
+	// Bit 20 is a cause nobody names; it has to survive as one.
+	for _, r := range []V2IPDecoderReason{4, 8, 20} {
+		if !d.HasReason(r) {
+			t.Errorf("HasReason(%d) = false, want true", r)
+		}
+	}
+	for _, r := range []V2IPDecoderReason{DecoderReasonOK, 5, 21} {
+		if d.HasReason(r) {
+			t.Errorf("HasReason(%d) = true, want false", r)
+		}
+	}
+}
+
+// The three states a report can be in are distinct, and only the third carries
+// fields: a sender too old to have the block at all is not a decoder that has
+// never answered, and neither is a reading of 0x0.
+func TestV2IPDecoderThreeStates(t *testing.T) {
+	r, sender, feed := cmdRemote(t, 82, Callbacks{})
+	dev := r.GetByUID(sender)
+
+	feed(opV2IPStats, statsPayload(v2ipStatsSize, nil))
+	if st := dev.V2IPStats(); st == nil || st.DecoderReported || st.Decoder != nil {
+		t.Fatalf("128-byte payload: reported = %v, decoder = %+v", st.DecoderReported, st.Decoder)
+	}
+
+	unanswered := poisoned(decoderDetailSize)
+	unanswered[0] = 0
+	feed(opV2IPStats, statsPayload(v2ipStatsSize+decoderDetailSize, unanswered))
+	if st := dev.V2IPStats(); st == nil || !st.DecoderReported || st.Decoder != nil {
+		t.Fatalf("valid=0: reported = %v, decoder = %+v", st.DecoderReported, st.Decoder)
+	}
+
+	feed(opV2IPStats, statsPayload(v2ipStatsSize+decoderDetailSize, decoderVector))
+	if st := dev.V2IPStats(); st == nil || !st.DecoderReported || st.Decoder == nil {
+		t.Fatalf("valid=1: reported = %v, decoder = %+v", st.DecoderReported, st.Decoder)
+	}
+}
+
+// Every field of the block read at its own width, with values a narrower or
+// wider read cannot reproduce: a byte-wide Format read returns the right answer
+// for every value currently named, so give it a non-zero high byte.
+func TestV2IPDecoderFieldWidths(t *testing.T) {
+	r, sender, feed := cmdRemote(t, 83, Callbacks{})
+
+	d := poisoned(decoderDetailSize)
+	d[0] = 1                                        // valid
+	d[1] = 0x0b                                     // reason, one past the last named value
+	d[2] = 1                                        // blocking
+	d[3] = 0x5a                                     // reserved, must not be read as blocking
+	binary.LittleEndian.PutUint16(d[4:6], 0x0500)   // width 1280
+	binary.LittleEndian.PutUint16(d[6:8], 0x02d0)   // height 720
+	binary.LittleEndian.PutUint16(d[8:10], 0x0102)  // format 258, low byte a named value
+	binary.LittleEndian.PutUint16(d[10:12], 0xfffe) // updates, just short of the wrap
+	binary.LittleEndian.PutUint32(d[12:16], 0x80000010)
+	binary.LittleEndian.PutUint32(d[16:20], 0xdeadbeef)
+	feed(opV2IPStats, statsPayload(v2ipStatsSize+decoderDetailSize, d))
+
+	st := r.GetByUID(sender).V2IPStats()
+	if st == nil || st.Decoder == nil {
+		t.Fatalf("stats = %+v", st)
+	}
+	got := st.Decoder
+	want := V2IPDecoderDetail{
+		Reason: 0x0b, Blocking: true,
+		Width: 1280, Height: 720,
+		Format: 258, Updates: 0xfffe,
+		Flags: 0x80000010, BlockedCount: 0xdeadbeef,
+	}
+	if *got != want {
+		t.Fatalf("decoder = %+v, want %+v", *got, want)
+	}
+	// An unnamed reason and an unnamed format both stay opaque rather than
+	// being folded onto a named one.
+	if s := got.Reason.String(); s != "reason 11" {
+		t.Errorf("reason 11 renders as %q", s)
+	}
+	if s := got.Format.String(); s != "format 258" {
+		t.Errorf("format 258 renders as %q", s)
+	}
+	// Bit 31 is the top of the word and bit 4 a named cause; bit 24 is clear,
+	// and reason 32 is past the word rather than a bit that wrapped into it.
+	if !got.HasReason(31) || !got.HasReason(4) || got.HasReason(24) || got.HasReason(32) {
+		t.Errorf("flags %#08x: 31 = %v, 4 = %v, 24 = %v, 32 = %v", got.Flags,
+			got.HasReason(31), got.HasReason(4), got.HasReason(24), got.HasReason(32))
+	}
+}
+
+// Appending the decoder block moved no counter, and a payload longer than this
+// library understands is parsed up to the prefix it does understand.
+func TestV2IPStatsCountersSurviveTheDecoderBlock(t *testing.T) {
+	r, sender, feed := cmdRemote(t, 84, Callbacks{})
+
+	for _, n := range []int{v2ipStatsSize + decoderDetailSize, v2ipStatsSize + decoderDetailSize + 8} {
+		p := statsPayload(n, decoderVector)
+		binary.LittleEndian.PutUint32(p[0:4], 11)    // tx totals, video
+		binary.LittleEndian.PutUint32(p[20:24], 22)  // tx per minute, video
+		binary.LittleEndian.PutUint32(p[40:44], 33)  // rx totals, video total
+		binary.LittleEndian.PutUint32(p[80:84], 1)   // rx totals, decoder state
+		binary.LittleEndian.PutUint32(p[84:88], 55)  // rx per minute, video total
+		binary.LittleEndian.PutUint32(p[124:128], 2) // rx per minute, decoder state
+		feed(opV2IPStats, p)
+
+		st := r.GetByUID(sender).V2IPStats()
+		if st == nil {
+			t.Fatalf("%d-byte payload: no stats", n)
+		}
+		if st.Tx.Video != 11 || st.TxPerMinute.Video != 22 || st.Rx.VideoTotal != 33 || st.RxPerMinute.VideoTotal != 55 {
+			t.Errorf("%d-byte payload: counters = %+v / %+v", n, st.Tx, st.Rx)
+		}
+		if st.Rx.DecoderState != DecoderHealthy || st.RxPerMinute.DecoderState != DecoderBad {
+			t.Errorf("%d-byte payload: states = %v / %v", n, st.Rx.DecoderState, st.RxPerMinute.DecoderState)
+		}
+		if st.Decoder == nil || st.Decoder.Width != 3840 {
+			t.Errorf("%d-byte payload: decoder = %+v", n, st.Decoder)
+		}
+	}
+}
+
+// A stamp above this library's own version must not cost us the frame. Reports
+// carrying the decoder block are stamped 0x29; a receive ceiling would drop them
+// whole, losing the counters that were already being decoded rather than only
+// the block that was added.
+func TestReceiveHasNoProtocolCeiling(t *testing.T) {
+	r, sender, feed := cmdRemote(t, 85, Callbacks{})
+	feed(opSysHello, helloPayload(0x28, "ONEIP", "CM0001", "4.8.0", FeatureV2IPSink))
+
+	above := ProtocolVersion + 1
+	p := statsPayload(v2ipStatsSize+decoderDetailSize, decoderVector)
+	binary.LittleEndian.PutUint32(p[40:44], 4242) // rx totals, video total
+	r.processFrame(buildFrame(sender, opV2IPStats, above, p), "10.8.8.9", time.Now())
+
+	st := r.GetByUID(sender).V2IPStats()
+	if st == nil {
+		t.Fatalf("frame stamped %#x was dropped", above)
+	}
+	if st.Rx.VideoTotal != 4242 || st.Decoder == nil || st.Decoder.Width != 3840 {
+		t.Fatalf("stamped %#x: rx = %d, decoder = %+v", above, st.Rx.VideoTotal, st.Decoder)
+	}
+}
+
+// V2IPStats hands out a copy: a caller mutating the decoder it was given must
+// not reach the cached reading.
+func TestV2IPStatsCopiesTheDecoder(t *testing.T) {
+	r, sender, feed := cmdRemote(t, 86, Callbacks{})
+	feed(opV2IPStats, statsPayload(v2ipStatsSize+decoderDetailSize, decoderVector))
+
+	dev := r.GetByUID(sender)
+	first := dev.V2IPStats()
+	first.Decoder.Width = 1
+	if got := dev.V2IPStats(); got.Decoder.Width != 3840 {
+		t.Fatalf("cached width = %d after a caller wrote 1, want 3840", got.Decoder.Width)
+	}
+}
+
+// Format answers nothing about whether a stream is present: a working RGB
+// stream and no stream at all both read DecoderFormatRGB, and only the
+// geometry beside it tells them apart. Reading format 0 as no-signal reports a
+// dead sink on a live one.
+func TestV2IPDecoderFormatZeroIsNotNoSignal(t *testing.T) {
+	r, sender, feed := cmdRemote(t, 87, Callbacks{})
+	dev := r.GetByUID(sender)
+
+	// Format is what stays put across the two halves. The reason moves with the
+	// geometry because the wire ties them: a sink reporting no geometry does
+	// not also report OK, so holding the reason still would build a state no
+	// device sends.
+	block := func(w, h uint16, reason V2IPDecoderReason) []byte {
+		d := poisoned(decoderDetailSize)
+		d[0] = 1 // valid
+		d[1] = byte(reason)
+		d[2] = 0 // blocking
+		binary.LittleEndian.PutUint16(d[4:6], w)
+		binary.LittleEndian.PutUint16(d[6:8], h)
+		binary.LittleEndian.PutUint16(d[8:10], uint16(DecoderFormatRGB))
+		binary.LittleEndian.PutUint16(d[10:12], 7)
+		binary.LittleEndian.PutUint32(d[12:16], 0)
+		binary.LittleEndian.PutUint32(d[16:20], 0)
+		return d
+	}
+
+	feed(opV2IPStats, statsPayload(v2ipStatsSize+decoderDetailSize, block(1920, 1080, DecoderReasonOK)))
+	live := dev.V2IPStats().Decoder
+	if live == nil || !live.Recovered() || live.Width != 1920 || live.Height != 1080 {
+		t.Fatalf("working RGB stream: decoder = %+v", live)
+	}
+
+	feed(opV2IPStats, statsPayload(v2ipStatsSize+decoderDetailSize, block(0, 0, DecoderReasonNoFormat)))
+	none := dev.V2IPStats().Decoder
+	if none == nil || none.Recovered() {
+		t.Fatalf("no stream: decoder = %+v", none)
+	}
+
+	// The pair proves nothing once the formats differ. Pin both to the constant
+	// rather than to each other: an equality check still passes if a later edit
+	// moves both halves together, which quietly makes them two ordinary
+	// fixtures.
+	if live.Format != DecoderFormatRGB || none.Format != DecoderFormatRGB {
+		t.Fatalf("formats = %v / %v, want RGB for both; the fixture no longer isolates geometry",
+			live.Format, none.Format)
+	}
+}
+
+// A half geometry is not a recovered picture. No sink sends one - a decoder
+// that recovered a width recovered a height - which is exactly why every other
+// fixture sets both or neither, leaving && and || indistinguishable.
+func TestV2IPDecoderHalfGeometryIsNotRecovered(t *testing.T) {
+	r, sender, feed := cmdRemote(t, 89, Callbacks{})
+	dev := r.GetByUID(sender)
+
+	for _, g := range []struct{ w, h uint16 }{{0, 2160}, {3840, 0}} {
+		d := poisoned(decoderDetailSize)
+		d[0] = 1
+		d[1] = byte(DecoderReasonNoFormat)
+		d[2] = 0
+		binary.LittleEndian.PutUint16(d[4:6], g.w)
+		binary.LittleEndian.PutUint16(d[6:8], g.h)
+		binary.LittleEndian.PutUint16(d[8:10], uint16(DecoderFormatYCbCr422))
+		binary.LittleEndian.PutUint16(d[10:12], 9)
+		binary.LittleEndian.PutUint32(d[12:16], 0)
+		binary.LittleEndian.PutUint32(d[16:20], 0)
+		feed(opV2IPStats, statsPayload(v2ipStatsSize+decoderDetailSize, d))
+
+		got := dev.V2IPStats().Decoder
+		if got == nil || got.Width != g.w || got.Height != g.h {
+			t.Fatalf("%dx%d: decoder = %+v", g.w, g.h, got)
+		}
+		if got.Recovered() {
+			t.Errorf("%dx%d counts as a recovered picture", g.w, g.h)
+		}
+	}
+}
+
+// reason is whichever cause won a fixed priority order, which is deliberately
+// not the numbering, so it is derivable from flags by no rule at all. These
+// three readings rule out the two rules someone would reach for, and both
+// shapes are needed: with only the restart loop, a lowest-set-bit rule still
+// passes.
+func TestV2IPDecoderReasonIsNotDerivableFromFlags(t *testing.T) {
+	r, sender, feed := cmdRemote(t, 90, Callbacks{})
+	dev := r.GetByUID(sender)
+
+	cases := []struct {
+		name   string
+		reason V2IPDecoderReason
+		bits   []V2IPDecoderReason
+	}{
+		{"teardown, switch pending wins", DecoderReasonSwitchPending,
+			[]V2IPDecoderReason{DecoderReasonNoPackets, DecoderReasonNoFormat, DecoderReasonSwitchPending}},
+		{"teardown settled", DecoderReasonNoPackets,
+			[]V2IPDecoderReason{DecoderReasonNoPackets, DecoderReasonNoFormat}},
+		{"restart loop, bit 9 invisible in reason", DecoderReasonNoPackets,
+			[]V2IPDecoderReason{DecoderReasonNoPackets, DecoderReasonTxBridgeUnlocked}},
+	}
+
+	lowestAgrees, highestAgrees := 0, 0
+	for _, c := range cases {
+		var flags uint32
+		for _, b := range c.bits {
+			flags |= 1 << uint(b)
+		}
+		d := poisoned(decoderDetailSize)
+		d[0] = 1
+		d[1] = byte(c.reason)
+		d[2] = 0
+		binary.LittleEndian.PutUint16(d[4:6], 0)
+		binary.LittleEndian.PutUint16(d[6:8], 0)
+		binary.LittleEndian.PutUint16(d[8:10], uint16(DecoderFormatRGB))
+		binary.LittleEndian.PutUint16(d[10:12], 3)
+		binary.LittleEndian.PutUint32(d[12:16], flags)
+		binary.LittleEndian.PutUint32(d[16:20], 0)
+		feed(opV2IPStats, statsPayload(v2ipStatsSize+decoderDetailSize, d))
+
+		got := dev.V2IPStats().Decoder
+		if got == nil || got.Reason != c.reason || got.Flags != flags {
+			t.Fatalf("%s: reason = %v, flags = %#x, want %v / %#x", c.name, got.Reason, got.Flags, c.reason, flags)
+		}
+		for _, b := range c.bits {
+			if !got.HasReason(b) {
+				t.Errorf("%s: HasReason(%v) = false", c.name, b)
+			}
+		}
+		// Bit 0 is force-cleared, so OK is never among the causes.
+		if got.HasReason(DecoderReasonOK) {
+			t.Errorf("%s: HasReason(OK) = true", c.name)
+		}
+		if c.reason == c.bits[0] {
+			lowestAgrees++
+		}
+		if c.reason == c.bits[len(c.bits)-1] {
+			highestAgrees++
+		}
+	}
+
+	// The set is only worth having while it still contradicts both rules.
+	if lowestAgrees == len(cases) {
+		t.Error("every reading agrees with lowest-set-bit; the set no longer rules that out")
+	}
+	if highestAgrees == len(cases) {
+		t.Error("every reading agrees with highest-set-bit; the set no longer rules that out")
 	}
 }

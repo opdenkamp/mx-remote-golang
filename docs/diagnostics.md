@@ -21,18 +21,92 @@ same struct.
 
 ## V2IP statistics
 
-Statistics are off until asked for:
+Statistics are off until asked for, and the subscription lapses 60s after the
+request that armed it — call `ReadStats(true)` again inside the minute to keep
+reports coming, since the library does not re-arm on its own. Reports then
+arrive at 1Hz.
 
 ```go
 d.ReadStats(true)
 if st := d.V2IPStats(); st != nil {
     st.Tx; st.TxPerMinute      // video, audio, ancillary, stream-down, overflow
     st.Rx; st.RxPerMinute
+
+    st.DecoderReported         // false on firmware that does not carry the block
+    if dec := st.Decoder; dec != nil {
+        dec.Reason             // primary cause
+        dec.Flags              // every cause that applies, dec.HasReason(r)
+        dec.Width; dec.Height  // recovered from the codestream, pre-scaler
+        dec.Format             // recovered colour space
+        dec.Updates            // readings stored so far
+        dec.Blocking; dec.BlockedCount
+    }
 }
 ```
 
 Cumulative counters and per-minute counters are reported side by side, so a rate
 does not have to be derived from two samples.
+
+### Decoder detail
+
+`st.Decoder` is what the sink's decoder recovered from the codestream it is
+being given, as opposed to what came out of the scaler after it. Three states
+are distinct and mean different things:
+
+| `DecoderReported` | `Decoder` | |
+|---|---|---|
+| false | nil | the firmware does not report decoder detail |
+| true | nil | it does, and the decoder has never answered |
+| true | non-nil | a reading |
+
+`valid` follows the sink being *configured*, not enabled, so a configured sink
+that is switched off still reports. It does **not** say that it was switched
+off: it reports `DecoderReasonNoPackets` and holds there, indistinguishable
+from a sink whose source is dead. Nothing in this block distinguishes the two —
+ask `V2IP_DEVICE_CFG` or the device HTTP status.
+
+Three things routinely get read wrong here:
+
+- **Geometry, not `Format`, says whether anything was recovered.** With no
+  stream `Format` reads `DecoderFormatRGB`, which a real RGB stream is
+  indistinguishable from, so treating format 0 as no-signal reports a dead sink
+  on a live one. `Decoder.Recovered()` asks the question correctly.
+- **`DecoderFormatUnnamed` is 255, and is not the `0xF` that means unknown in
+  `MxrSignalType.ColourSpace`.** The two do not convert into one another.
+- **Colour depth is absent and stays absent**, because it is not recovered
+  from the codestream. Assert bit depth at the encoder's input bay instead.
+
+`Reason` and `Format` values this library has no name for are passed through as
+they arrived, so check for the constants you handle rather than assuming the
+set is closed.
+
+**Classify on `Flags`, and use `Reason` only for display.** Every cause that
+applies sets its bit, where `Reason` is whichever one won a fixed priority
+order — deliberately not the numbering, so it is neither the lowest nor the
+highest bit set and cannot be derived from `Flags`. The case that makes this
+concrete is `DecoderReasonTxBridgeUnlocked`, which ranks below every
+input-side cause: a sink restarting in a loop names an input cause in `Reason`
+and carries bit 9 in `Flags` alone, permanently. Code keyed on `Reason` misses
+a restart loop entirely.
+
+```go
+if dec.HasReason(DecoderReasonTxBridgeUnlocked) {
+    // true whether or not it is what Reason names
+}
+```
+
+### Reading freshness
+
+The decoder is read every 2s and the report goes out every 1s, latched between
+reads, so roughly every other report repeats a reading already seen: a frame
+arriving says nothing about freshness. `Updates` counts readings actually
+stored — monotonic, never reset, wrapping at 65535 (about 36 hours) — so a
+stalled decoder leaves it still rather than implying a refresh.
+
+After changing what a sink is pointed at, wait for `Updates` to advance by
+**two** before trusting the geometry. The counter ticks when a reply lands
+rather than when a query is sent, so a single tick can carry an answer read
+fractionally before the switch.
 
 ## Firmware and system status
 

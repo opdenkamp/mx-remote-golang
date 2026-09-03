@@ -663,7 +663,7 @@ func (d *Device) V2IPStats() *V2IPDeviceStats {
 	if d.v2ipStats == nil {
 		return nil
 	}
-	v := *d.v2ipStats
+	v := d.v2ipStats.clone()
 	return &v
 }
 

@@ -395,6 +395,11 @@ func (b *Bay) SetZoneSettings(s AmpZoneSettings) error {
 }
 
 // ReadStats enables or disables V2IP statistics reporting on the device.
+//
+// There is no free-running mode: a device reports only while a subscription is
+// live, and the subscription lapses 60s after the request that armed it. Call
+// this again inside the minute to keep reports coming; the library does not
+// re-arm on its own. Reports then arrive at 1Hz.
 func (d *Device) ReadStats(enable bool) error {
 	r := d.remote
 	r.mu.Lock()
