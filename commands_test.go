@@ -1117,6 +1117,50 @@ func TestV2IPDecoderFormatZeroIsNotNoSignal(t *testing.T) {
 	}
 }
 
+// Every counter read at its own offset, over a payload carrying a distinct
+// value in every four-byte word. Asserting that the 128- and 152-byte forms
+// agree with each other cannot catch a shift, since two reads off the same
+// wrong offset agree, so each field is pinned to the value its own offset
+// holds.
+func TestV2IPStatsCounterOffsets(t *testing.T) {
+	r, sender, feed := cmdRemote(t, 88, Callbacks{})
+	p := statsPayload(v2ipStatsSize+decoderDetailSize, decoderVector)
+	for o := 0; o < v2ipStatsSize; o += 4 {
+		binary.LittleEndian.PutUint32(p[o:o+4], uint32(0x100+o))
+	}
+	feed(opV2IPStats, p)
+
+	st := r.GetByUID(sender).V2IPStats()
+	if st == nil {
+		t.Fatal("no stats")
+	}
+	w := func(o int) uint32 { return uint32(0x100 + o) }
+	tx := func(name string, got V2IPTxStats, at int) {
+		want := V2IPTxStats{Video: w(at), Audio: w(at + 4), Anc: w(at + 8),
+			StreamDown: w(at + 12), Overflow: w(at + 16)}
+		if got != want {
+			t.Errorf("%s = %+v, want %+v", name, got, want)
+		}
+	}
+	rx := func(name string, got V2IPRxStats, at int) {
+		want := V2IPRxStats{
+			VideoTotal: w(at), VideoDropped: w(at + 4), VideoSeqErrors: w(at + 8),
+			WdtTimeout: w(at + 12), AudioTotal: w(at + 16), AudioDropped: w(at + 20),
+			AudioSeqErrors: w(at + 24), AncTotal: w(at + 28), AncDropped: w(at + 32),
+			AncSeqErrors: w(at + 36),
+			// one byte at block offset 40, so the low byte of the word there
+			DecoderState: V2IPDecoderState(byte(w(at + 40))),
+		}
+		if got != want {
+			t.Errorf("%s = %+v, want %+v", name, got, want)
+		}
+	}
+	tx("tx totals", st.Tx, 0)
+	tx("tx per minute", st.TxPerMinute, txStatsSize)
+	rx("rx totals", st.Rx, 2*txStatsSize)
+	rx("rx per minute", st.RxPerMinute, 2*txStatsSize+rxStatsSize)
+}
+
 // A half geometry is not a recovered picture. No sink sends one - a decoder
 // that recovered a width recovered a height - which is exactly why every other
 // fixture sets both or neither, leaving && and || indistinguishable.
