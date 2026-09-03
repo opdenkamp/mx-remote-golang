@@ -361,24 +361,29 @@ func TestRCSettingsDecode(t *testing.T) {
 	}
 }
 
-// The audio SELECT_INPUT body names the sink twice - once as the command
-// header's target and again at offset 20 - with the source at 36. Decoding
-// those the other way round swaps source and sink.
+// The audio SELECT_INPUT body carries the route end to end: the sink at offset
+// 20 and the source at 36, with their endpoint ids after. Decoding those the
+// other way round swaps source and sink.
+//
+// The three uids here are all different. The header names the device addressed
+// for the hop that carried the frame, which is the sink only on a single-hop
+// route, so a fixture that lets the header and the body's sink be the same uid
+// cannot tell a body-read orientation from a header-read one.
 func TestAudioSelectInputOrientation(t *testing.T) {
 	var got AudioChangeSource
 	r, sender, feed := cmdRemote(t, 60, Callbacks{
 		OnAudioSelectInput: func(_ *Device, c AudioChangeSource) { got = c },
 	})
-	source := uidN(61)
+	source, sink := uidN(61), uidN(63)
 
 	p := audioCmdHeader(audioOpSelectInput, sender)
-	p = append(p, sender[:]...) // sink, repeated after the header
+	p = append(p, sink[:]...)
 	p = append(p, source[:]...)
 	p = append(p, 7, 0, 9, 0) // sink endpoint 7, source endpoint 9
 	feed(opV2IPAudio, p)
 
-	if got.TargetUID != sender || got.TargetID != 7 {
-		t.Fatalf("sink = %s:%d, want %s:7", got.TargetUID, got.TargetID, sender)
+	if got.TargetUID != sink || got.TargetID != 7 {
+		t.Fatalf("sink = %s:%d, want %s:7", got.TargetUID, got.TargetID, sink)
 	}
 	if got.SourceUID != source || got.SourceID != 9 {
 		t.Fatalf("source = %s:%d, want %s:9", got.SourceUID, got.SourceID, source)

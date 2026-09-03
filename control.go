@@ -363,12 +363,25 @@ func (d *Device) AudioTrigger(endpointID int, trigger bool) error {
 }
 
 // AudioVolumeSet sets the volume of an audio endpoint on this device.
+//
+// Nothing receives this. The audio module handles the mute and trigger
+// sub-commands and dispatches this one to the branch it uses for a command it
+// does not recognise, and nothing acknowledges anything on these paths, so the
+// send succeeds and no volume changes. Bay.VolumeSet is the call that works.
+// This one stays because the module transmits the same sub-command itself and a
+// receiver may appear.
 func (d *Device) AudioVolumeSet(endpointID, volume int) error {
 	return d.sendAudio(append(audioCmdHeader(audioOpVolume, d.uid), audioParam(endpointID, volume)...))
 }
 
 // AudioSelectInput routes a source endpoint (on the given source device) to a
 // sink endpoint on this device.
+//
+// The body names the route end to end, sink first, while the command header
+// names the device addressed for this hop. A single-hop command puts the sink
+// in both, as this one does, but they are separate fields that a receiver reads
+// separately: neither is derived from the other. See AudioChangeSource for the
+// reversed field names in the receiving struct.
 func (d *Device) AudioSelectInput(sinkEP *AudioEndpoint, source DeviceUID, sourceEP *AudioEndpoint) error {
 	if sinkEP == nil || sourceEP == nil {
 		return fmt.Errorf("nil endpoint")

@@ -195,11 +195,16 @@ type AudioLink struct {
 // AudioChangeSource describes an audio input-selection change: which source
 // endpoint a sink endpoint was switched to.
 //
-// The sink is named twice on the wire, once as the command header's target and
-// again at the head of the body; the body's second uid is the source. The
-// reference Python library's decoder reads these the other way round from its
-// own frame builder - the header convention every other audio sub-command
-// follows is what settles it.
+// The body names the route end to end and is read on its own: its first uid is
+// the sink and its second is the source. The command header names whichever
+// device is addressed for the hop that carried the frame, which is the sink
+// only when the route has one hop, so taking the sink from there would mislabel
+// every longer route.
+//
+// The receiving struct calls its first uid the source and its second the
+// target, the reverse of what they hold, and the receiver reads them by
+// position regardless. The field names are the trap here: nothing on the wire
+// tells a swapped reading from a correct one.
 type AudioChangeSource struct {
 	// SourceUID and SourceID name the endpoint being listened to.
 	SourceUID DeviceUID
@@ -215,7 +220,9 @@ func (a AudioChangeSource) String() string {
 }
 
 // parseAudioChangeSource decodes a SELECT_INPUT body, which follows the 20-byte
-// audio command header: sink uid, source uid, then the two endpoint ids.
+// audio command header: sink uid, source uid, then the sink and source endpoint
+// ids. See AudioChangeSource for why the orientation is taken from the body
+// alone.
 func parseAudioChangeSource(f *frame) (AudioChangeSource, bool) {
 	sink, ok := f.uuid(20)
 	if !ok {
