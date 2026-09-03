@@ -124,7 +124,24 @@ through `processFrame` in `state_test.go` and `subsystems_test.go`.
   unrecognised one. Keep the conversion late — hold the raw value and return the
   typed one from the accessor, so an unrecognised value survives to the caller.
 - **A payload that grew tells its versions apart by length, not by the header
-  stamp.** Parse the prefix you understand and ignore the tail.
+  stamp.** Parse the prefix you understand and ignore the tail. Length gates
+  are minimums; where several forms share an opcode, test them longest first,
+  or a grown short form is swallowed by the longer form's minimum. An exact
+  length is right only where a field widening superseded a layout, shifting
+  every following offset - and that is selected by the frame's protocol
+  version, as `handleNetworkStatus` does. A block appended at the back needs
+  the stamp too, as a floor read with the length rather than instead of it:
+  the length says the bytes are there, the stamp says they are that block
+  rather than a later growth, and `handleV2IPStats` reads both. A floor is
+  never a ceiling on the frame - the prefix is read whatever the sender
+  stamps.
+- **No payload length may panic a handler.** The slicing that reads a fixed
+  block is bounded by a gate written elsewhere in the handler, so a gate
+  moved or narrowed indexes past the payload and takes the receive goroutine
+  with it. `TestNoPayloadLengthPanicsAHandler` sweeps every handler for this.
+  A trailing variable array is the one shape no gate protects: bytes appended
+  past its last element read as another element, so growing one is a wire
+  break its sender has to announce.
 - **Build test payloads with `poisoned()`, not `make([]byte, n)`.** A
   zero-filled fixture cannot catch a field read at the right offset but the
   wrong width. Give every field a distinct value, and assert each against the

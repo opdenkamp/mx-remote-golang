@@ -1055,6 +1055,45 @@ func TestReceiveHasNoProtocolCeiling(t *testing.T) {
 	}
 }
 
+// The stamp is a floor on the decoder block, not a ceiling on the frame. A
+// sender predating the block appended no such thing, so 24 bytes past the
+// counters are some other growth: reading them would invent a reason, a
+// geometry and a fault word out of bytes that mean something else.
+//
+// Both halves are asserted against the same payload, so the difference measured
+// is the stamp and nothing else. The counters are read either way, which is
+// what a ceiling on the frame would have thrown away with the tail.
+func TestDecoderBlockNeedsTheStampAndTheLength(t *testing.T) {
+	for _, tc := range []struct {
+		stamp    uint16
+		reported bool
+	}{
+		{decoderProtocol - 1, false},
+		{decoderProtocol, true},
+	} {
+		r, sender, feed := cmdRemote(t, 87, Callbacks{})
+		feed(opSysHello, helloPayload(0x28, "ONEIP", "CM0001", "4.8.0", FeatureV2IPSink))
+
+		p := statsPayload(v2ipStatsSize+decoderDetailSize, decoderVector)
+		binary.LittleEndian.PutUint32(p[40:44], 4242) // rx totals, video total
+		r.processFrame(buildFrame(sender, opV2IPStats, tc.stamp, p), "10.8.8.9", time.Now())
+
+		st := r.GetByUID(sender).V2IPStats()
+		if st == nil {
+			t.Fatalf("stamped %#x: the whole report was dropped", tc.stamp)
+		}
+		if st.Rx.VideoTotal != 4242 {
+			t.Errorf("stamped %#x: rx video total = %d, want 4242", tc.stamp, st.Rx.VideoTotal)
+		}
+		if st.DecoderReported != tc.reported {
+			t.Errorf("stamped %#x: DecoderReported = %v, want %v", tc.stamp, st.DecoderReported, tc.reported)
+		}
+		if got := st.Decoder != nil; got != tc.reported {
+			t.Errorf("stamped %#x: decoder present = %v, want %v", tc.stamp, got, tc.reported)
+		}
+	}
+}
+
 // V2IPStats hands out a copy: a caller mutating the decoder it was given must
 // not reach the cached reading.
 func TestV2IPStatsCopiesTheDecoder(t *testing.T) {
@@ -1258,5 +1297,142 @@ func TestV2IPDecoderReasonIsNotDerivableFromFlags(t *testing.T) {
 	}
 	if highestAgrees == len(cases) {
 		t.Error("every reading agrees with highest-set-bit; the set no longer rules that out")
+	}
+}
+
+// A payload grows by appending at the back, so a length gate has to be a
+// minimum. Where several forms share an opcode they are tested longest first,
+// or a grown short form is swallowed by the longer form's minimum.
+func TestGrownPayloadsKeepTheirForm(t *testing.T) {
+	target := uidN(57)
+	tail := []byte{0xDE, 0xAD, 0xBE, 0xEF}
+
+	t.Run("factory reset target", func(t *testing.T) {
+		var got FactoryResetRequest
+		_, _, feed := cmdRemote(t, 53, Callbacks{
+			OnFactoryResetRequested: func(_ *Device, req FactoryResetRequest) { got = req },
+		})
+		feed(opSysFactoryReset, append(append([]byte(nil), target[:]...), tail...))
+		if got.Target == nil || *got.Target != target {
+			t.Fatalf("grown target form = %+v, want target %v", got, target)
+		}
+	})
+
+	t.Run("factory reset all", func(t *testing.T) {
+		var got FactoryResetRequest
+		_, _, feed := cmdRemote(t, 54, Callbacks{
+			OnFactoryResetRequested: func(_ *Device, req FactoryResetRequest) { got = req },
+		})
+		feed(opSysFactoryReset, []byte{0xFF, 0x01})
+		if !got.All || got.Target != nil {
+			t.Fatalf("grown broadcast form = %+v", got)
+		}
+	})
+
+	t.Run("power save target", func(t *testing.T) {
+		var got V2IPPowerSaveRequest
+		_, _, feed := cmdRemote(t, 55, Callbacks{
+			OnPowerSaveRequested: func(_ *Device, req V2IPPowerSaveRequest) { got = req },
+		})
+		p := append(append([]byte(nil), target[:]...), 1)
+		feed(opV2IPPowerSave, append(p, tail...))
+		if got.Target == nil || *got.Target != target || !got.Enabled {
+			t.Fatalf("grown target form = %+v", got)
+		}
+	})
+
+	t.Run("power save broadcast", func(t *testing.T) {
+		var got V2IPPowerSaveRequest
+		_, _, feed := cmdRemote(t, 56, Callbacks{
+			OnPowerSaveRequested: func(_ *Device, req V2IPPowerSaveRequest) { got = req },
+		})
+		feed(opV2IPPowerSave, []byte{1, 0x99})
+		if got.Target != nil || !got.Enabled {
+			t.Fatalf("grown broadcast form = %+v", got)
+		}
+	})
+
+	t.Run("filter status", func(t *testing.T) {
+		r, sender, feed := cmdRemote(t, 57, Callbacks{})
+		feed(opSysBayConfig, bayConfigRec(2, 1, 0, "Output 1", "TV", 0, BayHDMIOut))
+		a := uidN(61)
+		p := append(append([]byte(nil), sender[:]...), a[:]...)
+		feed(opBayFilterStatus, append(p, tail...))
+
+		filtered := r.GetByUID(sender).GetByPortnum(2).FilteredDevices()
+		if len(filtered) != 1 || filtered[0] != a {
+			t.Fatalf("filtered = %v, want [%v]", filtered, a)
+		}
+	})
+}
+
+// A factory reset with no payload asks the sender to reset itself, so an
+// unrecognised payload must be dropped rather than falling into that form.
+func TestFactoryResetIgnoresUnknownForm(t *testing.T) {
+	calls := 0
+	_, _, feed := cmdRemote(t, 58, Callbacks{
+		OnFactoryResetRequested: func(_ *Device, _ FactoryResetRequest) { calls++ },
+	})
+	feed(opSysFactoryReset, []byte{0x01, 0x02, 0x03})
+	if calls != 0 {
+		t.Fatalf("unknown form raised %d reset requests", calls)
+	}
+}
+
+// No payload length may panic a handler. A length gate placed in front of the
+// wrong thing breaks this invariant rather than merely mis-filing a frame: the
+// slicing that reads a fixed block is bounded by a gate elsewhere in the
+// handler, so removing or narrowing that gate indexes past the payload and
+// takes the receive goroutine down with it.
+//
+// Every handler is swept, because the gate that protects one block is rarely
+// written next to it. The sweep is over lengths rather than contents for the
+// same reason - a gate reads the length, so length is the axis that reaches
+// one. The three stamps matter where a handler selects a layout by version and
+// then slices for it.
+func TestNoPayloadLengthPanicsAHandler(t *testing.T) {
+	opcodes := make([]uint16, 0, len(frameHandlers)+2)
+	for op := range frameHandlers {
+		opcodes = append(opcodes, op)
+	}
+	// two the table has no entry for, so an unknown opcode is swept as well
+	opcodes = append(opcodes, 0xFFFE, 0xFFFF)
+
+	lengths := make([]int, 0, 300)
+	for n := 0; n <= 260; n++ {
+		lengths = append(lengths, n)
+	}
+	// past the sweep, the lengths the wider payloads gate on
+	lengths = append(lengths, 512, 513, 514, 515, 1024)
+
+	patterns := map[string]func(int) []byte{
+		"zero":     func(n int) []byte { return make([]byte, n) },
+		"poisoned": poisoned,
+		"ones": func(n int) []byte {
+			p := make([]byte, n)
+			for i := range p {
+				p[i] = 0xFF
+			}
+			return p
+		},
+	}
+
+	for _, stamp := range []uint16{0x01, 0x28, ProtocolVersion} {
+		for name, fill := range patterns {
+			r, sender, feed := cmdRemote(t, 88, Callbacks{})
+			feed(opSysHello, helloPayload(0x28, "ONEIP", "SW0001", "4.8.0", FeatureV2IPSink|FeatureV2IPSource))
+			for _, op := range opcodes {
+				for _, n := range lengths {
+					func() {
+						defer func() {
+							if e := recover(); e != nil {
+								t.Fatalf("opcode %#x, %d bytes, %s, stamped %#x: %v", op, n, name, stamp, e)
+							}
+						}()
+						r.processFrame(buildFrame(sender, op, stamp, fill(n)), "10.8.8.9", time.Now())
+					}()
+				}
+			}
+		}
 	}
 }

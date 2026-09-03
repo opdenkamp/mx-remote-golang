@@ -82,6 +82,12 @@ const (
 	// decoderDetailSize is 20 bytes of fields rounded up by ALIGN(8), so the
 	// last four bytes are padding a sender clears rather than a field.
 	decoderDetailSize = 24
+
+	// decoderProtocol is the protocol version the decoder block appeared at.
+	// It is read with the length rather than instead of it: the length says a
+	// payload is long enough to hold the block, and the stamp says those bytes
+	// are that block rather than a later growth this library has no name for.
+	decoderProtocol uint16 = 0x29
 )
 
 // V2IPDecoderReason is the primary cause a decoder reports for its current
@@ -268,8 +274,9 @@ type V2IPDeviceStats struct {
 	RxPerMinute V2IPRxStats
 
 	// DecoderReported is true when the report carried the decoder block at
-	// all. A sender predating the block sends a 128-byte payload and carries
-	// none, which is a different thing from a decoder that has never answered.
+	// all. A sender predating the block stamps a version from before it
+	// existed, and whatever its payload length, carries none - which is a
+	// different thing from a decoder that has never answered.
 	DecoderReported bool
 
 	// Decoder is the decoder's reading, nil while the decoder has never
@@ -335,20 +342,25 @@ func parseDecoderDetail(d []byte) *V2IPDecoderDetail {
 	}
 }
 
-// handleV2IPStats (opcode 0x3F) decodes encoder/decoder statistics. Frames of
-// length 17 are enable/disable requests and carry no statistics.
+// handleV2IPStats (opcode 0x3F) decodes encoder/decoder statistics. The opcode
+// also carries the enable/disable request, which is a uid and a flag and so
+// falls far short of the counters: the one length test below tells the two
+// forms apart and rejects a truncated report at the same time.
 //
-// The decoder block appended at 128 is present or absent by payload length,
-// not by the frame's protocol stamp: length survives a further block being
-// appended after it, where a stamp comparison would reject the longer payload
-// whole. Parse the prefix understood here and ignore any tail.
+// The decoder block appended at 128 is recognised by the stamp and the length
+// together. Neither alone is enough - a sender predating the block appended no
+// such thing, so a payload of its own that runs 24 bytes past the counters is
+// some other growth, and reading it invents a report with a reason, a geometry
+// and a fault word in it. The stamp is a floor on the block and not a ceiling
+// on the frame, so the counters are read whatever the sender stamps and a
+// further block appended after this one is ignored rather than rejected.
 func handleV2IPStats(r *Remote, f *frame) {
 	dev := r.deviceFor(f)
 	if dev == nil {
 		return
 	}
 	p := f.payload()
-	if len(p) == 17 || len(p) < v2ipStatsSize {
+	if len(p) < v2ipStatsSize {
 		return
 	}
 	rx := 2 * txStatsSize
@@ -358,7 +370,7 @@ func handleV2IPStats(r *Remote, f *frame) {
 		Rx:          parseRxStats(p[rx : rx+rxStatsSize]),
 		RxPerMinute: parseRxStats(p[rx+rxStatsSize : rx+2*rxStatsSize]),
 	}
-	if len(p) >= v2ipStatsSize+decoderDetailSize {
+	if f.protocol() >= decoderProtocol && len(p) >= v2ipStatsSize+decoderDetailSize {
 		stats.DecoderReported = true
 		stats.Decoder = parseDecoderDetail(p[v2ipStatsSize : v2ipStatsSize+decoderDetailSize])
 	}

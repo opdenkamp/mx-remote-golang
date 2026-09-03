@@ -625,13 +625,18 @@ func handleSetInstaller(r *Remote, f *frame) {
 
 // handleFilterStatus decodes the list of source devices filtered out of a
 // sink's picker: a target uid followed by zero or more filtered uids.
+//
+// Only whole records are read and a short tail is ignored, so a field appended
+// after the list still leaves the list readable. A tail of 16 bytes or more
+// would read as another uid, which no length gate can prevent - growing this
+// payload is a wire break for the sender to announce.
 func handleFilterStatus(r *Remote, f *frame) {
 	dev := r.deviceFor(f)
 	if dev == nil {
 		return
 	}
 	p := f.payload()
-	if len(p) < 16 || len(p)%16 != 0 {
+	if len(p) < 16 {
 		return
 	}
 	filtered := make([]DeviceUID, 0, len(p)/16-1)
@@ -647,6 +652,11 @@ func handleFilterStatus(r *Remote, f *frame) {
 	out.setFiltered(filtered)
 }
 
+// handleFactoryReset decodes three forms: an empty payload asking the sender
+// to reset itself, a bare 0xFF for every device, and a target uid for one.
+// They are told apart by length, so they are tested longest first and anything
+// matching none is dropped - falling through would ask a device to reset
+// itself on the strength of a payload nothing here understood.
 func handleFactoryReset(r *Remote, f *frame) {
 	dev := r.deviceFor(f)
 	if dev == nil || r.callbacks.OnFactoryResetRequested == nil {
@@ -655,12 +665,14 @@ func handleFactoryReset(r *Remote, f *frame) {
 	p := f.payload()
 	var req FactoryResetRequest
 	switch {
-	case len(p) == 1 && p[0] == 0xFF:
-		req.All = true
-	case len(p) == 16:
+	case len(p) >= 16:
 		var uid DeviceUID
 		copy(uid[:], p[0:16])
 		req.Target = &uid
+	case len(p) >= 1 && p[0] == 0xFF:
+		req.All = true
+	case len(p) != 0:
+		return
 	}
 	cb := r.callbacks.OnFactoryResetRequested
 	r.emit(func() { cb(dev, req) })
@@ -695,7 +707,8 @@ func handleV2IPTiling(r *Remote, f *frame) {
 }
 
 // handleV2IPPowerSave decodes both forms: a bare flag broadcast to every peer,
-// and a uid-addressed flag for one unit.
+// and a uid-addressed flag for one unit. They are told apart by length, so the
+// longer form is tested first.
 func handleV2IPPowerSave(r *Remote, f *frame) {
 	dev := r.deviceFor(f)
 	if dev == nil || r.callbacks.OnPowerSaveRequested == nil {
@@ -704,12 +717,12 @@ func handleV2IPPowerSave(r *Remote, f *frame) {
 	p := f.payload()
 	var req V2IPPowerSaveRequest
 	switch {
-	case len(p) == 1:
-		req.Enabled = p[0] == 1
-	case len(p) == 17:
+	case len(p) >= 17:
 		var uid DeviceUID
 		copy(uid[:], p[0:16])
 		req.Target, req.Enabled = &uid, p[16] == 1
+	case len(p) >= 1:
+		req.Enabled = p[0] == 1
 	default:
 		return
 	}
